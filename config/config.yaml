@@ -1,0 +1,65 @@
+# ==============================================================================
+# Friend-Bot 設定檔 (config.yaml)
+# ==============================================================================
+
+# Discord 機器人頻道與行為設定
+bot:
+  # 【互動與回覆頻道】機器人會在此發言並與大家聊天的專屬頻道 ID 列表
+  reply_channel_ids: [1542218293505429504]
+
+  # 【純監聽與記憶頻道】機器人會默默旁聽、記錄對話歷史並更新用戶特徵，但「不會主動回覆」的頻道 ID 列表
+  listen_channel_ids: [1542218343279239278]
+  
+  # 是否在生成回應時顯示 Discord 的「正在輸入... (Typing)」狀態
+  show_typing: true
+  
+  # 單則 Discord 訊息最大字元數 (Discord 預設上限為 2000)
+  max_message_length: 2000
+
+# 訊息發送與自然氣泡行為設定
+chat_behavior:
+  # 是否開啟擬真多氣泡自然分段發送
+  enable_multi_bubble: true
+  
+  # 單則氣泡的目標字數（達到此字數時將尋找最近的句號、換行等標點切分為下一則訊息）
+  bubble_target_length: 35
+  
+  # 多則訊息之間的擬真打字停頓時間（秒）[最小秒數, 最大秒數]
+  typing_delay_range: [0.6, 1.3]
+
+# Gemini AI 模型設定
+gemini:
+  # 預設使用的 Gemini 模型
+  model: "gemini-3.1-flash-lite"
+  
+  # 溫度值 (0.0 ~ 2.0)：數值越高越隨機幽默，數值越低越精準嚴謹
+  temperature: 0.85
+  
+  # 單次最大生成 Token 數
+  max_output_tokens: 2048
+
+# 三層全記憶系統設定
+memory:
+  # 第 1 層 (短期記憶)：送入 Prompt 的最近頻道對話訊息數量
+  short_term_history_limit: 15
+  
+  # 第 2 層 (長期畫像)：是否開啟背景自動分析對話並提取/更新用戶特徵（含純監聽頻道）
+  enable_auto_memory_extraction: true
+  
+  # 第 3 層 (深層歷史回憶)：是否在檢測到話題或回憶觸發時自動檢索過去相關歷史對話（跨頻道回憶）
+  enable_history_recall: true
+  
+  # 每次歷史回憶檢索注入的歷史片段數量上限
+  history_recall_limit: 4
+  
+  # 本地 SQLite 資料庫儲存路徑（永久保存所有訊息與記憶）
+  db_path: "data/friend_bot.db"
+
+# 機器人個性與 Persona 設定
+persona:
+  # 機器人暱稱
+  bot_name: "克莉絲"
+  
+  # 角色性格設定檔路徑（Markdown .md 檔案）
+  # 機器人將直接讀取此 .md 檔案作為 System Prompt，方便自由撰寫長篇人設
+  persona_file: "persona.md"
