@@ -15,12 +15,14 @@
 2. **雙軌頻道機制**：
    * **回覆專屬頻道 (`reply_channel_ids`)**：機器人在此頻道參與聊天並幽默回覆。
    * **純監聽記憶頻道 (`listen_channel_ids`)**：機器人默默旁聽並更新群友記憶，不插話打擾。
-3. **擬真多氣泡連續發送 (`chat_behavior`)**：
+3. **即時畫像查詢指令 (`/profile`)**：
+   * 在頻道輸入 `/profile` 或 `/profile @群友`，立即以精美 Embed 卡片展示已記錄的特徵、喜好與互動印象。
+4. **擬真多氣泡連續發送 (`chat_behavior`)**：
    * 智慧依據段落、句末標點（。！？）拆分為多則自然長度的訊息氣泡。
    * 發送後續段落時自動顯示「正在輸入...」並帶有真實人類鍵盤節奏（0.6 ~ 1.3 秒隨機延遲）。
    * 支援 Markdown Code Block 語法完整保護不破版。
-4. **多模態視覺理解**：當群友上傳圖片時，Gemini 能結合影像與歷史上下文一同吐槽或互動。
-5. **靈活設定**：透過 [config/config.yaml](config/config.yaml) 與 [config/persona.md](config/persona.md) 輕鬆微調人設、模型參數與記憶深度。
+5. **多模態視覺理解**：當群友上傳圖片時，Gemini 能結合影像與歷史上下文一同吐槽或互動。
+6. **靈活設定**：透過 [config/config.yaml](config/config.yaml) 與 [config/persona.md](config/persona.md) 輕鬆微調人設、模型參數與記憶深度。
 
 ---
 
@@ -57,6 +59,16 @@ bot:
 
 ---
 
+## 📋 常用指令
+
+| 指令 | 說明 | 範例 |
+| :--- | :--- | :--- |
+| `/profile` | 查詢發言者本人的長期記憶畫像與特徵 | `/profile` |
+| `/profile @用戶` | 查詢指定標註對象的個人特徵畫像 | `/profile @Trito_Nozan` |
+| `/profile <User ID>` | 透過 Discord User ID 查詢畫像 | `/profile 555738929584930868` |
+
+---
+
 ## 🧹 命令列參數 (CLI 記憶管理)
 
 在啟動時，您可以透過額外參數來管理或清空機器人的記憶：
@@ -78,5 +90,5 @@ bot:
 * ⚙️ [src/friend_bot/core/](file:///C:/ALL%20FILES/Code/friend-bot/src/friend_bot/core/)：全域設定解析與工業級彩色日誌
 * 🧠 [src/friend_bot/memory/](file:///C:/ALL%20FILES/Code/friend-bot/src/friend_bot/memory/)：SQLite 資料庫與三層記憶管理器
 * 🤖 [src/friend_bot/ai/](file:///C:/ALL%20FILES/Code/friend-bot/src/friend_bot/ai/)：Gemini 3.1 Flash-Lite 與多模態生成、背景記憶提取器
-* 💬 [src/friend_bot/bot/](file:///C:/ALL%20FILES/Code/friend-bot/src/friend_bot/bot/)：Discord 事件監聽、語意分段切分與擬真發送路由
+* 💬 [src/friend_bot/bot/](file:///C:/ALL%20FILES/Code/friend-bot/src/friend_bot/bot/)：Discord 事件監聽、`/profile` 查詢指令、語意分段切分與擬真發送路由
 * 🧪 [src/test/tests_verify.py](file:///C:/ALL%20FILES/Code/friend-bot/src/test/tests_verify.py)：三層記憶與檢索功能測試腳本
