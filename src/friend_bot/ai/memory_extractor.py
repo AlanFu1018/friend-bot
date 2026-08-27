@@ -31,7 +31,7 @@ class MemoryExtractor:
             current_facts = profile.get("facts", []) if profile else []
             current_notes = profile.get("interaction_notes", "") if profile else ""
 
-            # 2. 建構提煉 Prompt
+            # 2. 建立提煉 Prompt
             prompt = build_extraction_prompt(
                 user_name=user_name,
                 current_facts=current_facts,
@@ -39,12 +39,13 @@ class MemoryExtractor:
                 recent_user_messages=recent_messages
             )
 
-            # 3. 呼叫 Gemini 進行結構化萃取（溫度設低以求精準）
+            # 3. 呼叫 Gemini 進行結構化萃取（關閉 Web Search Tool 且溫度設低以求精準）
             raw_result = await self.ai.generate_response(
                 prompt=prompt,
                 system_instruction="你是一個嚴謹的資料分析器，請以乾淨的 JSON 格式輸出提取結果，禁止任何無關廢話。",
                 temperature=0.2,
-                max_tokens=1024
+                max_tokens=1024,
+                enable_tools=False
             )
 
             # 4. 解析 JSON

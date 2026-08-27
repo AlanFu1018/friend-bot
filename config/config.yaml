@@ -27,6 +27,17 @@ chat_behavior:
   # 多則訊息之間的擬真打字停頓時間（秒）[最小秒數, 最大秒數]
   typing_delay_range: [0.6, 1.3]
 
+# 聯網即時搜尋與網頁閱讀 (Web Search Tool) 設定
+web_search:
+  # 是否啟用 DuckDuckGo + Jina AI Reader 即時聯網檢索工具
+  enable_web_search: true
+  
+  # 搜尋抓取排名前 N 名的網址
+  search_top_k: 3
+  
+  # 單一網頁透過 Jina AI 擷取 Markdown 內容的最大字元上限（避免 context 過長）
+  max_content_length_per_page: 2500
+
 # Gemini AI 模型設定
 gemini:
   # 預設使用的 Gemini 模型
