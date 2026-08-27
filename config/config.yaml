@@ -59,7 +59,7 @@ calendar:
 # Gemini AI 模型設定
 gemini:
   # 預設使用的 Gemini 模型
-  model: "gemini-2.5-flash"
+  model: "gemini-3.1-flash-lite"
   
   # 溫度值 (0.0 ~ 2.0)：數值越高越隨機幽默，數值越低越精準嚴謹
   temperature: 0.85
