@@ -6,12 +6,18 @@ from src.friend_bot.memory.memory_manager import MemoryManager
 from src.friend_bot.core.logger import get_logger
 from .prompts import build_multi_entity_extraction_prompt, build_batch_dialogue_extraction_prompt
 from .gemini_client import GeminiClient
-from src.friend_bot.core.config import ENABLE_AUTO_MEMORY_EXTRACTION
+from src.friend_bot.core.config import (
+    ENABLE_AUTO_MEMORY_EXTRACTION,
+    ENABLE_FAVORABILITY,
+    DEFAULT_FAVORABILITY,
+    DAILY_GAIN_LIMIT,
+    DAILY_LOSS_LIMIT
+)
 
 logger = get_logger("extractor")
 
 class MemoryExtractor:
-    """非同步背景記憶提取器：支援單則提煉、監聽頻道多輪批次提煉、JIT 按需統合與事實增量保護"""
+    """非同步背景記憶提煉器：支援單則提煉、監聽頻道多輪批次提煉、JIT 按需統合、好感度評估與事實增量保護"""
 
     def __init__(self, gemini_client: Optional[GeminiClient] = None):
         self.ai = gemini_client or GeminiClient()
@@ -20,7 +26,7 @@ class MemoryExtractor:
         self._lock = asyncio.Lock()
 
     async def _safe_apply_updates(self, updates: List[Dict[str, Any]], default_user_name: str = "") -> None:
-        """核心安全合併管線：歷史事實永久保護 + remove_facts 精準更正 + 印象動態演進"""
+        """核心安全合併管線：歷史事實永久保護 + remove_facts 精準更正 + 隱密好感度計算與印象演進"""
         if not isinstance(updates, list) or not updates:
             return
 
@@ -32,6 +38,7 @@ class MemoryExtractor:
             incoming_facts_raw = update_item.get("facts", [])
             remove_facts_raw = update_item.get("remove_facts", [])
             notes = update_item.get("interaction_notes", "")
+            raw_fav_delta = update_item.get("favorability_delta", 0)
 
             # 若 JSON 未給出明確 user_id，嘗試從 known_name_map 補全
             if not target_uid or target_uid == "None":
@@ -45,6 +52,10 @@ class MemoryExtractor:
             current_p = await MemoryManager.get_user_profile(target_uid)
             cur_facts = current_p.get("facts", []) if current_p else []
             cur_notes = current_p.get("interaction_notes", "") if current_p else ""
+            cur_fav = current_p.get("favorability", DEFAULT_FAVORABILITY) if current_p else DEFAULT_FAVORABILITY
+            cur_tier = current_p.get("relationship_tier", "familiar") if current_p else "familiar"
+            cur_daily_gain = current_p.get("daily_favorability_gain", 0) if current_p else 0
+            cur_gain_date = current_p.get("last_gain_date", "") if current_p else ""
 
             # 【安全更正與移除機制】：處理需要被精準剔除的舊事實
             remove_clean = [
@@ -71,16 +82,54 @@ class MemoryExtractor:
             # 互動印象保護
             merged_notes = str(notes).strip() if (notes and str(notes).strip()) else cur_notes
 
-            # 若事實或印象有實質變更，寫回資料庫
-            if merged_facts != cur_facts or merged_notes != cur_notes:
+            # 【好感度與關係階級計算】
+            try:
+                delta_int = int(raw_fav_delta)
+            except (ValueError, TypeError):
+                delta_int = 0
+
+            if ENABLE_FAVORABILITY and delta_int != 0:
+                new_fav, new_tier, new_daily_gain, today_str = MemoryManager.calculate_favorability_update(
+                    current_score=cur_fav,
+                    current_daily_gain=cur_daily_gain,
+                    last_gain_date=cur_gain_date,
+                    delta=delta_int,
+                    gain_limit=DAILY_GAIN_LIMIT,
+                    loss_limit=DAILY_LOSS_LIMIT
+                )
+            else:
+                new_fav = cur_fav
+                new_tier = cur_tier
+                new_daily_gain = cur_daily_gain
+                today_str = cur_gain_date
+
+            # 判斷是否有實質變更需寫回資料庫
+            has_changes = (
+                merged_facts != cur_facts or
+                merged_notes != cur_notes or
+                new_fav != cur_fav or
+                new_tier != cur_tier or
+                new_daily_gain != cur_daily_gain or
+                current_p is None
+            )
+
+            if has_changes:
                 final_user_name = target_name or (current_p.get("user_name") if current_p else default_user_name or target_name)
                 await MemoryManager.update_user_profile(
                     user_id=target_uid,
                     user_name=final_user_name,
                     facts=merged_facts,
-                    interaction_notes=merged_notes
+                    interaction_notes=merged_notes,
+                    favorability=new_fav,
+                    relationship_tier=new_tier,
+                    daily_favorability_gain=new_daily_gain,
+                    last_gain_date=today_str
                 )
-                logger.info(f"🧠 [畫像更新] 用戶 [{final_user_name} ({target_uid})] 記憶更新: facts={merged_facts}")
+                logger.info(
+                    f"🧠 [畫像/好感更新] 用戶 [{final_user_name} ({target_uid})] "
+                    f"好感度: {cur_fav} -> {new_fav} ({new_tier}), 今日增量: {new_daily_gain}/{DAILY_GAIN_LIMIT}, "
+                    f"facts={len(merged_facts)} 條"
+                )
 
     async def extract_and_update(
         self,
@@ -99,7 +148,8 @@ class MemoryExtractor:
                 "user_id": str(user_id),
                 "user_name": user_name,
                 "facts": speaker_profile.get("facts", []) if speaker_profile else [],
-                "interaction_notes": speaker_profile.get("interaction_notes", "") if speaker_profile else ""
+                "interaction_notes": speaker_profile.get("interaction_notes", "") if speaker_profile else "",
+                "favorability": speaker_profile.get("favorability", DEFAULT_FAVORABILITY) if speaker_profile else DEFAULT_FAVORABILITY
             }
 
             other_users_info = []
@@ -116,7 +166,7 @@ class MemoryExtractor:
 
             raw_result = await self.ai.generate_response(
                 prompt=prompt,
-                system_instruction="你是一個嚴謹的資料分析器，請以乾淨的 JSON 格式輸出多實體記憶提取結果，禁止任何無關廢話。",
+                system_instruction="你是一個嚴謹的資料分析器，請以乾淨的 JSON 格式輸出多實體記憶提取與好感度評估結果，禁止任何無關廢話。",
                 temperature=0.2,
                 max_tokens=1536,
                 enable_tools=False
@@ -140,7 +190,7 @@ class MemoryExtractor:
         messages: List[Dict[str, Any]]
     ) -> None:
         """
-        【批次多輪對話提煉】：一次性消化多條累積訊息，全局提煉多個群友特徵並標記 extracted=1
+        【批次多輪對話提煉】：一次性消化多條累積訊息，全局提煉多個群友特徵與好感度並標記 extracted=1
         """
         if not ENABLE_AUTO_MEMORY_EXTRACTION or not messages:
             return
@@ -164,7 +214,7 @@ class MemoryExtractor:
             # 4. 呼叫 Gemini 進行全局分析
             raw_result = await self.ai.generate_response(
                 prompt=prompt,
-                system_instruction="你是一個嚴謹的資料分析器，請以乾淨的 JSON 格式輸出批次對話記憶提取結果，禁止任何無關廢話。",
+                system_instruction="你是一個嚴謹的資料分析器，請以乾淨的 JSON 格式輸出批次對話記憶提煉與好感度評估結果，禁止任何無關廢話。",
                 temperature=0.2,
                 max_tokens=2048,
                 enable_tools=False

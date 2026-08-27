@@ -1,7 +1,7 @@
 from pathlib import Path
 from contextlib import asynccontextmanager
 import aiosqlite
-from src.friend_bot.core.config import DB_PATH
+from src.friend_bot.core.config import DB_PATH, DEFAULT_FAVORABILITY
 from src.friend_bot.core.logger import get_logger
 
 logger = get_logger("database")
@@ -45,12 +45,12 @@ async def init_db():
         except Exception as e:
             logger.debug(f"messages 欄位檢查: {e}")
 
-        # 索引優化：依頻道快速查詢近期訊息，依用戶快速查詢發言，依未提煉狀態快速檢索
+        # 索引優化
         await db.execute("CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel_id, id DESC);")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_messages_user ON messages(user_id);")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_messages_unextracted ON messages(channel_id, extracted, id ASC);")
 
-        # 2. 全文搜尋虛擬表 (FTS5) - 用於跨歷史深度話題回憶
+        # 2. 全文搜尋虛擬表 (FTS5)
         try:
             await db.execute("""
             CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
@@ -63,16 +63,39 @@ async def init_db():
         except Exception as e:
             logger.warning(f"FTS5 全文搜尋表建置提醒: {e}")
 
-        # 3. 結構化用戶長期畫像與特徵表
-        await db.execute("""
+        # 3. 結構化用戶長期畫像、特徵與好感度表
+        await db.execute(f"""
         CREATE TABLE IF NOT EXISTS user_profiles (
             user_id TEXT PRIMARY KEY,
             user_name TEXT NOT NULL,
             facts TEXT DEFAULT '[]',
             interaction_notes TEXT DEFAULT '',
+            favorability INTEGER DEFAULT {DEFAULT_FAVORABILITY},
+            relationship_tier TEXT DEFAULT 'familiar',
+            daily_favorability_gain INTEGER DEFAULT 0,
+            last_gain_date TEXT DEFAULT '',
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         """)
+
+        # 遷移檢查：若舊表沒有好感度相關欄位，動態補上
+        try:
+            cursor = await db.execute("PRAGMA table_info(user_profiles);")
+            prof_cols = [row["name"] for row in await cursor.fetchall()]
+            if "favorability" not in prof_cols:
+                await db.execute(f"ALTER TABLE user_profiles ADD COLUMN favorability INTEGER DEFAULT {DEFAULT_FAVORABILITY};")
+                logger.info("已為 user_profiles 表新增 favorability 欄位")
+            if "relationship_tier" not in prof_cols:
+                await db.execute("ALTER TABLE user_profiles ADD COLUMN relationship_tier TEXT DEFAULT 'familiar';")
+                logger.info("已為 user_profiles 表新增 relationship_tier 欄位")
+            if "daily_favorability_gain" not in prof_cols:
+                await db.execute("ALTER TABLE user_profiles ADD COLUMN daily_favorability_gain INTEGER DEFAULT 0;")
+                logger.info("已為 user_profiles 表新增 daily_favorability_gain 欄位")
+            if "last_gain_date" not in prof_cols:
+                await db.execute("ALTER TABLE user_profiles ADD COLUMN last_gain_date TEXT DEFAULT '';")
+                logger.info("已為 user_profiles 表新增 last_gain_date 欄位")
+        except Exception as e:
+            logger.debug(f"user_profiles 欄位檢查: {e}")
 
         # 4. 紅莉栖行事曆排程與 Webhook 定時提醒表 (calendar_events)
         await db.execute("""
@@ -95,9 +118,9 @@ async def init_db():
         await db.execute("CREATE INDEX IF NOT EXISTS idx_cal_user_date ON calendar_events(user_id, target_date);")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_cal_user_status ON calendar_events(user_id, status);")
 
-        # 相容視圖或舊表
+        # 鬧鐘相容表
         await db.execute("""
-        CREATE TABLE IF NOT EXISTS alarms (\
+        CREATE TABLE IF NOT EXISTS alarms (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             channel_id TEXT NOT NULL,
             user_id TEXT NOT NULL,

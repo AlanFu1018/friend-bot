@@ -1,14 +1,70 @@
 import json
 import re
+from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple, Set
 from .db import get_db_connection
-from src.friend_bot.core.config import SHORT_TERM_HISTORY_LIMIT, HISTORY_RECALL_LIMIT
+from src.friend_bot.core.config import (
+    SHORT_TERM_HISTORY_LIMIT,
+    HISTORY_RECALL_LIMIT,
+    DEFAULT_FAVORABILITY,
+    DAILY_GAIN_LIMIT,
+    DAILY_LOSS_LIMIT
+)
 from src.friend_bot.core.logger import get_logger
 
 logger = get_logger("memory")
 
 class MemoryManager:
-    """三層記憶管理器：負責儲存與檢索短期對話、長期畫像與跨頻道歷史回憶"""
+    """三層記憶管理器：負責儲存與檢索短期對話、長期畫像、好感度與跨頻道歷史回憶"""
+
+    @staticmethod
+    def compute_relationship_tier(score: int) -> str:
+        """根據好感度數值計算關係階級 (Progression Tier)"""
+        if score < 20:
+            return "stranger"
+        elif score < 50:
+            return "familiar"
+        elif score < 80:
+            return "trusted"
+        else:
+            return "cherished"
+
+    @staticmethod
+    def calculate_favorability_update(
+        current_score: int,
+        current_daily_gain: int,
+        last_gain_date: str,
+        delta: int,
+        gain_limit: int = DAILY_GAIN_LIMIT,
+        loss_limit: int = DAILY_LOSS_LIMIT
+    ) -> Tuple[int, str, int, str]:
+        """
+        計算好感度更新（含跨日重設與每日上下限防刷保護）
+        回傳: (new_score, new_tier, new_daily_gain, today_str)
+        """
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        
+        # 若跨日，重置今日累積增量
+        if last_gain_date != today_str:
+            daily_gain = 0
+        else:
+            daily_gain = current_daily_gain
+
+        actual_delta = delta
+        if delta > 0:
+            # 正向加分：不可超過每日加分上限
+            allowed_gain = max(0, gain_limit - daily_gain)
+            actual_delta = min(delta, allowed_gain)
+            daily_gain += actual_delta
+        elif delta < 0:
+            # 負向扣分：單日最多扣 loss_limit
+            actual_delta = max(delta, -abs(loss_limit))
+
+        # 數值限制在 0 ~ 100
+        new_score = max(0, min(100, current_score + actual_delta))
+        new_tier = MemoryManager.compute_relationship_tier(new_score)
+
+        return new_score, new_tier, daily_gain, today_str
 
     @staticmethod
     async def save_message(
@@ -143,10 +199,10 @@ class MemoryManager:
 
     @staticmethod
     async def get_user_profile(user_id: str) -> Optional[Dict[str, Any]]:
-        """讀取指定用戶的長期畫像（包含事實清單與互動印象）"""
+        """讀取指定用戶的長期畫像（包含事實清單、互動印象、好感度與關係階級）"""
         async with get_db_connection() as db:
             async with db.execute("""
-            SELECT user_id, user_name, facts, interaction_notes, updated_at
+            SELECT user_id, user_name, facts, interaction_notes, favorability, relationship_tier, daily_favorability_gain, last_gain_date, updated_at
             FROM user_profiles
             WHERE user_id = ?
             """, (str(user_id),)) as cursor:
@@ -159,6 +215,16 @@ class MemoryManager:
                     data["facts"] = json.loads(data["facts"]) if data["facts"] else []
                 except Exception:
                     data["facts"] = []
+
+                if data.get("favorability") is None:
+                    data["favorability"] = DEFAULT_FAVORABILITY
+                if not data.get("relationship_tier"):
+                    data["relationship_tier"] = MemoryManager.compute_relationship_tier(data["favorability"])
+                if data.get("daily_favorability_gain") is None:
+                    data["daily_favorability_gain"] = 0
+                if data.get("last_gain_date") is None:
+                    data["last_gain_date"] = ""
+
                 return data
 
     @staticmethod
@@ -175,7 +241,7 @@ class MemoryManager:
         result = {}
         async with get_db_connection() as db:
             async with db.execute(f"""
-            SELECT user_id, user_name, facts, interaction_notes, updated_at
+            SELECT user_id, user_name, facts, interaction_notes, favorability, relationship_tier, daily_favorability_gain, last_gain_date, updated_at
             FROM user_profiles
             WHERE user_id IN ({placeholders})
             """, clean_ids) as cursor:
@@ -186,6 +252,16 @@ class MemoryManager:
                         data["facts"] = json.loads(data["facts"]) if data["facts"] else []
                     except Exception:
                         data["facts"] = []
+
+                    if data.get("favorability") is None:
+                        data["favorability"] = DEFAULT_FAVORABILITY
+                    if not data.get("relationship_tier"):
+                        data["relationship_tier"] = MemoryManager.compute_relationship_tier(data["favorability"])
+                    if data.get("daily_favorability_gain") is None:
+                        data["daily_favorability_gain"] = 0
+                    if data.get("last_gain_date") is None:
+                        data["last_gain_date"] = ""
+
                     result[data["user_id"]] = data
         return result
 
@@ -235,14 +311,12 @@ class MemoryManager:
 
         # 2. 方案 B: 純文字暱稱快速掃描
         if content:
-            # 同步檢查字串中的 <@123456> 格式
             mention_regex_ids = re.findall(r'<@!?(\d+)>', content)
             for uid_str in mention_regex_ids:
                 if uid_str not in seen_ids:
                     candidate_user_ids.append(uid_str)
                     seen_ids.add(uid_str)
 
-            # 比對已知用戶庫中的名字 (長度 >= 2，避免單字誤判)
             known_map = await MemoryManager.get_known_users_map()
             content_lower = content.lower()
             for known_name, uid in known_map.items():
@@ -281,14 +355,27 @@ class MemoryManager:
         user_id: str,
         user_name: str,
         facts: List[str],
-        interaction_notes: str = ""
+        interaction_notes: str = "",
+        favorability: Optional[int] = None,
+        relationship_tier: Optional[str] = None,
+        daily_favorability_gain: Optional[int] = None,
+        last_gain_date: Optional[str] = None
     ) -> None:
-        """更新或建立用戶長期畫像"""
+        """更新或建立用戶長期畫像與好感度狀態"""
         async with get_db_connection() as db:
             facts_json = json.dumps(facts, ensure_ascii=False)
+            
+            fav_val = favorability if favorability is not None else DEFAULT_FAVORABILITY
+            tier_val = relationship_tier if relationship_tier else MemoryManager.compute_relationship_tier(fav_val)
+            gain_val = daily_favorability_gain if daily_favorability_gain is not None else 0
+            date_val = last_gain_date if last_gain_date is not None else ""
+
             await db.execute("""
-            INSERT INTO user_profiles (user_id, user_name, facts, interaction_notes, updated_at)
-            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            INSERT INTO user_profiles (
+                user_id, user_name, facts, interaction_notes,
+                favorability, relationship_tier, daily_favorability_gain, last_gain_date, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(user_id) DO UPDATE SET
                 user_name = excluded.user_name,
                 facts = excluded.facts,
@@ -296,15 +383,40 @@ class MemoryManager:
                     WHEN excluded.interaction_notes != '' THEN excluded.interaction_notes 
                     ELSE user_profiles.interaction_notes 
                 END,
+                favorability = CASE 
+                    WHEN ? IS NOT NULL THEN ? 
+                    ELSE user_profiles.favorability 
+                END,
+                relationship_tier = CASE 
+                    WHEN ? != '' THEN ? 
+                    ELSE user_profiles.relationship_tier 
+                END,
+                daily_favorability_gain = CASE 
+                    WHEN ? IS NOT NULL THEN ? 
+                    ELSE user_profiles.daily_favorability_gain 
+                END,
+                last_gain_date = CASE 
+                    WHEN ? != '' THEN ? 
+                    ELSE user_profiles.last_gain_date 
+                END,
                 updated_at = CURRENT_TIMESTAMP
             """, (
                 str(user_id),
                 str(user_name),
                 facts_json,
-                interaction_notes
+                interaction_notes,
+                fav_val,
+                tier_val,
+                gain_val,
+                date_val,
+                # For ON CONFLICT
+                favorability, fav_val,
+                tier_val if relationship_tier else "", tier_val,
+                daily_favorability_gain, gain_val,
+                last_gain_date if last_gain_date else "", date_val
             ))
             await db.commit()
-            logger.debug(f"已更新用戶 [{user_name}] 的個人畫像 (事實數: {len(facts)})")
+            logger.debug(f"已更新用戶 [{user_name}] 的個人畫像 (好感度: {fav_val}, 階級: {tier_val})")
 
     @staticmethod
     async def recall_deep_history(
@@ -312,9 +424,7 @@ class MemoryManager:
         exclude_message_ids: Optional[List[str]] = None,
         limit: Optional[int] = None
     ) -> List[Dict[str, Any]]:
-        """
-        利用 FTS5 全文搜尋從過去所有對話（跨頻道）檢索與目前話題最相關的歷史對話片段
-        """
+        """利用 FTS5 全文搜尋從過去所有對話檢索最相關的歷史片段"""
         if limit is None:
             limit = HISTORY_RECALL_LIMIT
 

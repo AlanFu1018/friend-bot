@@ -67,11 +67,11 @@ MAX_MESSAGE_LENGTH: int = _bot_cfg.get("max_message_length", 2000)
 # 3. 聊天氣泡發送行為設定
 _chat_behavior_cfg = _yaml_config.get("chat_behavior", {})
 ENABLE_MULTI_BUBBLE: bool = bool(_chat_behavior_cfg.get("enable_multi_bubble", True))
-BUBBLE_TARGET_LENGTH: int = int(_chat_behavior_cfg.get("bubble_target_length", 120))
+BUBBLE_TARGET_LENGTH: int = int(_chat_behavior_cfg.get("bubble_target_length", 35))
 _typing_delay_cfg = _chat_behavior_cfg.get("typing_delay_range", [0.6, 1.3])
-TYPING_DELAY_RANGE: Tuple[float, float] = (\
-    float(_typing_delay_cfg[0]) if len(_typing_delay_cfg) > 0 else 0.6,\
-    float(_typing_delay_cfg[1]) if len(_typing_delay_cfg) > 1 else 1.3,\
+TYPING_DELAY_RANGE: Tuple[float, float] = (
+    float(_typing_delay_cfg[0]) if len(_typing_delay_cfg) > 0 else 0.6,
+    float(_typing_delay_cfg[1]) if len(_typing_delay_cfg) > 1 else 1.3,
 )
 
 # 4. 聯網搜尋 (Web Search) 設定
@@ -87,7 +87,7 @@ CALENDAR_AVATAR_URL: str = os.getenv("CALENDAR_AVATAR_URL", _cal_cfg.get("avatar
 
 # 6. Gemini 模型設定
 _gemini_cfg = _yaml_config.get("gemini", {})
-GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", _gemini_cfg.get("model", "gemini-3.1-flash-lite"))
+GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", _gemini_cfg.get("model", "gemini-2.5-flash"))
 GEMINI_TEMPERATURE: float = float(_gemini_cfg.get("temperature", 0.85))
 GEMINI_MAX_OUTPUT_TOKENS: int = int(_gemini_cfg.get("max_output_tokens", 2048))
 
@@ -99,9 +99,16 @@ ENABLE_HISTORY_RECALL: bool = bool(_mem_cfg.get("enable_history_recall", True))
 HISTORY_RECALL_LIMIT: int = int(_mem_cfg.get("history_recall_limit", 4))
 DB_PATH: str = str(BASE_DIR / _mem_cfg.get("db_path", "data/friend_bot.db"))
 
-# 8. Persona 與 System Prompt 設定（從 .md 檔案載入）
+# 8. 好感度與人際進展 (Favorability) 設定
+_fav_cfg = _yaml_config.get("favorability", {})
+ENABLE_FAVORABILITY: bool = bool(_fav_cfg.get("enable_favorability", True))
+DEFAULT_FAVORABILITY: int = int(_fav_cfg.get("default_favorability", 30))
+DAILY_GAIN_LIMIT: int = int(_fav_cfg.get("daily_gain_limit", 5))
+DAILY_LOSS_LIMIT: int = int(_fav_cfg.get("daily_loss_limit", 10))
+
+# 9. Persona 與 System Prompt 設定（從 .md 檔案載入）
 _persona_cfg = _yaml_config.get("persona", {})
-BOT_NAME: str = _persona_cfg.get("bot_name", "群友小助手")
+BOT_NAME: str = _persona_cfg.get("bot_name", "克莉絲")
 
 def _load_persona_prompt() -> str:
     """從指定的 markdown 檔案中載入角色性格設定（檢查 config/ 與根目錄）"""

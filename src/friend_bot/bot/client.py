@@ -13,6 +13,9 @@ from src.friend_bot.core.config import (
     REPLY_CHANNEL_IDS,
     LISTEN_CHANNEL_IDS,
     CALENDAR_WEBHOOK_URL,
+    ENABLE_FAVORABILITY,
+    DEFAULT_FAVORABILITY,
+    DAILY_GAIN_LIMIT
 )
 from src.friend_bot.memory import MemoryManager
 from src.friend_bot.bot.utils.alarm import AlarmManager, AlarmScheduler, parse_alarm_time
@@ -22,6 +25,20 @@ from src.friend_bot.ai.prompts import format_memory_context
 from src.friend_bot.bot.handlers import download_image_attachments, split_message
 
 logger = logging.getLogger("friend_bot.bot")
+
+TIER_NAME_MAP = {
+    "stranger": "Tier 1: 陌生警戒 (Stranger)",
+    "familiar": "Tier 2: 熟識群友 (Familiar)",
+    "trusted": "Tier 3: 實驗室夥伴 (Labmem Partner)",
+    "cherished": "Tier 4: 靈魂共鳴 (Steins;Gate Bond)"
+}
+
+def render_favorability_bar(score: int, total: int = 100, bar_length: int = 10) -> str:
+    """產生好感度視覺化進度條 [██████░░░░]"""
+    clamped_score = max(0, min(total, score))
+    filled = int(round((clamped_score / total) * bar_length))
+    filled = max(0, min(bar_length, filled))
+    return "█" * filled + "░" * (bar_length - filled)
 
 class FriendBotClient(discord.Client):
     """Discord Bot 客戶端（支援 /kurisu- 原生斜線指令、獨立定時鬧鐘、Webhook 行事曆排程與多人多維記憶系統）"""
@@ -147,7 +164,7 @@ class FriendBotClient(discord.Client):
                 )
 
         # 3. /kurisu-profile 指令
-        @self.tree.command(name="kurisu-profile", description="查看自己或指定群友的長期記憶特徵畫像與互動印象")
+        @self.tree.command(name="kurisu-profile", description="查看自己或指定群友的長期記憶特徵畫像與好感度進展")
         @app_commands.describe(user="選擇要查詢畫像的群友（留空代表查詢自己）")
         async def kurisu_profile_command(interaction: discord.Interaction, user: Optional[discord.User] = None):
             target_user = user or interaction.user
@@ -157,7 +174,7 @@ class FriendBotClient(discord.Client):
             profile = await MemoryManager.get_user_profile(target_user_id)
             embed = self._create_profile_embed(target_user_id, target_user_name, profile, target_user)
             await interaction.response.send_message(embed=embed)
-            logger.info(f"已向 [{interaction.user.display_name}] 透過 /kurisu-profile 顯示 [{target_user_name}] 的畫像")
+            logger.info(f"已向 [{interaction.user.display_name}] 透過 /kurisu-profile 顯示 [{target_user_name}] 的畫像與好感度")
 
         # 4. 【定時鬧鐘模組】/kurisu-alarm-set 指令
         @self.tree.command(name="kurisu-alarm-set", description="【設定定時提醒鬧鐘】紅莉栖會在指定時間以傲嬌風格發送醒目標題提醒")
@@ -265,7 +282,7 @@ class FriendBotClient(discord.Client):
                 await interaction.response.send_message(embed=embed, ephemeral=True)
 
         # 7. 【行事曆模組】/kurisu-calendar-set 指令
-        @self.tree.command(name="kurisu-calendar-set", description="【設定 Webhook 行事曆排程】登記日程並支援 Webhook 推送，平日聊天可直接問行程")
+        @self.tree.command(name="kurisu-calendar-set", description="【設定 Webhook 行事曆排程】登記日程並支援 Webhook 推送，平時聊天可直接問行程")
         @app_commands.describe(
             time="排程時間 (格式: y/m/d/h/m，例如 2026/8/27/15/30、8/27/15/30 或 15:30)",
             content="具體排程日程事項 (例如: 實驗室進度匯報、客戶會議)",
@@ -432,7 +449,7 @@ class FriendBotClient(discord.Client):
         )
         embed.add_field(
             name="🧠 `/kurisu-profile [用戶]`",
-            value="**【查詢用戶個人畫像】**\n查看機器人為你或指定群友建立的長期特徵、喜好與互動印象。\n*範例：`/kurisu-profile`*",
+            value="**【查詢用戶個人畫像與好感度】**\n查看機器人為你或指定群友建立的長期特徵、好感進展與互動印象。\n*範例：`/kurisu-profile`*",
             inline=False
         )
         embed.add_field(
@@ -464,13 +481,26 @@ class FriendBotClient(discord.Client):
         user_name_in_db = profile.get("user_name", target_user_name)
         facts = profile.get("facts", [])
         notes = profile.get("interaction_notes", "")
+        fav_score = profile.get("favorability", DEFAULT_FAVORABILITY)
+        tier = profile.get("relationship_tier", "familiar")
+        daily_gain = profile.get("daily_favorability_gain", 0)
         updated_at = profile.get("updated_at", "未知時間")
+
+        tier_title = TIER_NAME_MAP.get(tier, f"Tier: {tier}")
+        progress_bar = render_favorability_bar(fav_score, total=100, bar_length=10)
 
         embed = discord.Embed(
             title=f"🧠 個人特徵畫像檔案：{user_name_in_db}",
             description=f"以下是 {BOT_NAME} 目前為你整理的長期記憶特徵與互動印象：",
             color=0x3498DB
         )
+
+        if ENABLE_FAVORABILITY:
+            embed.add_field(
+                name="💖 關係進展 (Relationship Progression)",
+                value=f"**【{tier_title}】**\n📊 信任進度條：`[{progress_bar}]` **{fav_score} / 100** *(今日累積: +{daily_gain}/{DAILY_GAIN_LIMIT})*",
+                inline=False
+            )
 
         facts_formatted = "\n".join([f"• {f}" for f in facts]) if facts else "尚無記錄明確的事實特徵"
         embed.add_field(name="📌 已知特徵 / 喜好 / 事實", value=facts_formatted, inline=False)
@@ -578,7 +608,7 @@ class FriendBotClient(discord.Client):
                     exclude_message_ids=recent_msg_ids
                 )
 
-            # F. 組裝包含發言者與關係人畫像的 Prompt Context
+            # F. 組裝包含發言者與關係人畫像的 Prompt Context（包含好感度態度指令注入）
             memory_context = format_memory_context(
                 current_user_name=user_name,
                 user_profile=current_user_profile,
