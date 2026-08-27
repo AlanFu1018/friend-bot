@@ -38,6 +38,13 @@ web_search:
   # 單一網頁透過 Jina AI 擷取 Markdown 內容的最大字元上限（避免 context 過長）
   max_content_length_per_page: 2500
 
+# 行事曆與 Webhook 定時提醒設定
+calendar:
+  # 全域預設 Webhook URL（選填，若未填則自動在目標頻道調用或建立 Webhook / 頻道發送）
+  webhook_url: ""
+  # Webhook 顯示的紅莉栖頭像圖片 URL（選填）
+  avatar_url: ""
+
 # Gemini AI 模型設定
 gemini:
   # 預設使用的 Gemini 模型

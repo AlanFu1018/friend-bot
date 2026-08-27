@@ -62,11 +62,47 @@ async def init_db():
         );
         """)
 
+        # 4. 紅莉栖行事曆排程與 Webhook 定時提醒表 (calendar_events)
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS calendar_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            channel_id TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            user_name TEXT NOT NULL,
+            target_timestamp INTEGER NOT NULL,
+            target_date TEXT NOT NULL,
+            target_time TEXT NOT NULL,
+            target_time_str TEXT NOT NULL,
+            content TEXT NOT NULL,
+            webhook_url TEXT DEFAULT '',
+            status TEXT DEFAULT 'pending',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_cal_pending ON calendar_events(status, target_timestamp);")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_cal_user_date ON calendar_events(user_id, target_date);")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_cal_user_status ON calendar_events(user_id, status);")
+
+        # 相容視圖或舊表
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS alarms (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            channel_id TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            user_name TEXT NOT NULL,
+            target_timestamp INTEGER NOT NULL,
+            target_time_str TEXT NOT NULL,
+            content TEXT NOT NULL,
+            status TEXT DEFAULT 'pending',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        """)
+
         await db.commit()
         logger.info(f"SQLite 資料庫結構就緒: {DB_PATH}")
 
 async def clear_all_memory() -> None:
-    """清空所有記憶（包含所有頻道歷史對話、FTS5 全文索引與所有用戶長期畫像）"""
+    """清空所有記憶（包含所有頻道歷史對話、FTS5 全文索引、用戶畫像與行事曆）"""
     async with get_db_connection() as db:
         await db.execute("DELETE FROM messages;")
         try:
@@ -74,11 +110,13 @@ async def clear_all_memory() -> None:
         except Exception:
             pass
         await db.execute("DELETE FROM user_profiles;")
+        await db.execute("DELETE FROM calendar_events;")
+        await db.execute("DELETE FROM alarms;")
         await db.commit()
-    logger.info("🧹 已成功清空所有歷史訊息與用戶長期畫像！")
+    logger.info("🧹 已成功清空所有歷史訊息、用戶長期畫像與行事曆排程！")
 
 async def clear_history_only() -> None:
-    """僅清空所有頻道的對話歷史與全文索引，保留用戶長期特徵畫像"""
+    """僅清空所有頻道的對話歷史與全文索引，保留用戶長期特徵畫像與行事曆"""
     async with get_db_connection() as db:
         await db.execute("DELETE FROM messages;")
         try:
@@ -86,11 +124,11 @@ async def clear_history_only() -> None:
         except Exception:
             pass
         await db.commit()
-    logger.info("🧹 已清空所有頻道對話歷史（用戶個人畫像仍保留）。")
+    logger.info("🧹 已清空所有頻道對話歷史（用戶個人畫像與行事曆仍保留）。")
 
 async def clear_profiles_only() -> None:
-    """僅清空用戶個人特徵畫像，保留對話歷史紀錄"""
+    """僅清空用戶個人特徵畫像，保留對話歷史與行事曆紀錄"""
     async with get_db_connection() as db:
         await db.execute("DELETE FROM user_profiles;")
         await db.commit()
-    logger.info("🧹 已清空所有用戶長期特徵畫像（對話歷史仍保留）。")
+    logger.info("🧹 已清空所有用戶長期特徵畫像（對話歷史與行事曆仍保留）。")

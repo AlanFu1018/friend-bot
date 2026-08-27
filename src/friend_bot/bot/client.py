@@ -12,8 +12,11 @@ from src.friend_bot.core.config import (
     TYPING_DELAY_RANGE,
     REPLY_CHANNEL_IDS,
     LISTEN_CHANNEL_IDS,
+    CALENDAR_WEBHOOK_URL,
 )
 from src.friend_bot.memory import MemoryManager
+from src.friend_bot.bot.utils.alarm import AlarmManager, AlarmScheduler, parse_alarm_time
+from src.friend_bot.bot.utils.calendar import CalendarManager, CalendarScheduler, parse_calendar_time
 from src.friend_bot.ai import GeminiClient, MemoryExtractor
 from src.friend_bot.ai.prompts import format_memory_context
 from src.friend_bot.bot.handlers import download_image_attachments, split_message
@@ -21,16 +24,18 @@ from src.friend_bot.bot.handlers import download_image_attachments, split_messag
 logger = logging.getLogger("friend_bot.bot")
 
 class FriendBotClient(discord.Client):
-    """Discord Bot 客戶端（支援 /kurisu- 原生斜線指令）"""
+    """Discord Bot 客戶端（支援 /kurisu- 原生斜線指令、獨立定時鬧鐘與 Webhook 行事曆排程系統）"""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.tree = app_commands.CommandTree(self)
         self.gemini = GeminiClient()
         self.memory_extractor = MemoryExtractor()
+        self.alarm_scheduler = AlarmScheduler(self)
+        self.calendar_scheduler = CalendarScheduler(self)
 
     async def setup_hook(self):
-        """註冊 Discord 原生 /kurisu- 開頭的 Slash 指令（提供自動補全、參數提示與選單）"""
+        """註冊 Discord 原生 /kurisu- 開頭的 Slash 指令"""
         
         # 1. /kurisu-help 指令
         @self.tree.command(name="kurisu-help", description=f"查看 {BOT_NAME} 的所有指令功能說明指南")
@@ -55,9 +60,9 @@ class FriendBotClient(discord.Client):
             user_id = str(interaction.user.id)
             user_name = interaction.user.display_name
 
-            # 檢索上下文與畫像
             short_term = await MemoryManager.get_short_term_context(channel_id) if channel_id else []
             user_profile = await MemoryManager.get_user_profile(user_id)
+            calendar_summary = await CalendarManager.get_user_schedule_summary(user_id)
             deep_history = []
             if ENABLE_HISTORY_RECALL:
                 deep_history = await MemoryManager.recall_deep_history(query_text=query)
@@ -66,7 +71,8 @@ class FriendBotClient(discord.Client):
                 current_user_name=user_name,
                 user_profile=user_profile,
                 deep_history=deep_history,
-                short_term_history=short_term
+                short_term_history=short_term,
+                calendar_summary=calendar_summary
             )
 
             prompt = f"""{memory_context}
@@ -80,12 +86,10 @@ class FriendBotClient(discord.Client):
             response_text = await self.gemini.generate_response(prompt=prompt)
             chunks = split_message(response_text)
 
-            # 首則訊息透過 interaction followup 回傳
             if chunks:
                 first_msg = await interaction.followup.send(chunks[0])
                 current_ts = int(time.time())
                 
-                # 儲存用戶的搜尋發言
                 await MemoryManager.save_message(
                     message_id=str(interaction.id),
                     channel_id=channel_id,
@@ -97,7 +101,6 @@ class FriendBotClient(discord.Client):
                     timestamp=current_ts
                 )
 
-                # 若有多個氣泡，後續透過頻道發送
                 sent_chunks = [chunks[0]]
                 if len(chunks) > 1 and interaction.channel:
                     for idx, chunk in enumerate(chunks[1:], start=1):
@@ -112,7 +115,6 @@ class FriendBotClient(discord.Client):
                         sent_msg = await interaction.channel.send(chunk)
                         sent_chunks.append(chunk)
 
-                # 儲存機器人回覆
                 await MemoryManager.save_message(
                     message_id=str(first_msg.id if hasattr(first_msg, 'id') else interaction.id),
                     channel_id=channel_id,
@@ -124,7 +126,6 @@ class FriendBotClient(discord.Client):
                     timestamp=int(time.time())
                 )
 
-                # 背景非同步提煉特徵
                 asyncio.create_task(
                     self.memory_extractor.extract_and_update(
                         user_id=user_id,
@@ -146,13 +147,241 @@ class FriendBotClient(discord.Client):
             await interaction.response.send_message(embed=embed)
             logger.info(f"已向 [{interaction.user.display_name}] 透過 /kurisu-profile 顯示 [{target_user_name}] 的畫像")
 
+        # 4. 【定時鬧鐘模組】/kurisu-alarm-set 指令
+        @self.tree.command(name="kurisu-alarm-set", description="【設定定時提醒鬧鐘】紅莉栖會在指定時間以傲嬌風格發送醒目提醒")
+        @app_commands.describe(
+            time="提醒時間 (格式: y/m/d/h/m，例如 2026/8/27/15/30、8/27/15/30 或 15:30)",
+            content="要提醒的具體事項內容 (例如: 搶特展門票、吃藥、開會)"
+        )
+        async def kurisu_alarm_set_command(interaction: discord.Interaction, time: str, content: str):
+            content = content.strip()
+            if not content:
+                await interaction.response.send_message("（提醒內容不能是空的啦！請告訴我要提醒你什麼事。）", ephemeral=True)
+                return
+
+            try:
+                target_dt, target_ts, date_str, time_str, formatted_time_str = parse_alarm_time(time)
+            except ValueError as e:
+                embed_err = discord.Embed(
+                    title="⚠️【鬧鐘時間設定失敗】",
+                    description=f"哼，連時間格式都弄錯了！\n\n{str(e)}",
+                    color=0xE74C3C
+                )
+                embed_err.set_footer(text="格式範例：2026/8/27/15/30、8/27/15/30 或 15:30")
+                await interaction.response.send_message(embed=embed_err, ephemeral=True)
+                return
+
+            channel_id = str(interaction.channel_id) if interaction.channel_id else ""
+            user_id = str(interaction.user.id)
+            user_name = interaction.user.display_name
+
+            alarm_id = await AlarmManager.create_alarm(
+                channel_id=channel_id,
+                user_id=user_id,
+                user_name=user_name,
+                target_timestamp=target_ts,
+                target_time_str=formatted_time_str,
+                content=content
+            )
+
+            embed = discord.Embed(
+                title="⏰【紅莉栖的鬧鐘已設定】",
+                description=(
+                    f"哼，既然你特地拜託我了，那我就幫你記下來吧！\n"
+                    f"可別誤會了，我才不是特別關心你，只是實驗室助手對時間很嚴謹而已！"
+                ),
+                color=0x2ECC71
+            )
+            embed.add_field(name="📌 提醒事項", value=f"```{content}```", inline=False)
+            embed.add_field(name="⏳ 預定提醒時間", value=f"`{formatted_time_str}`", inline=True)
+            embed.add_field(name="🔢 鬧鐘編號", value=f"`#{alarm_id}`", inline=True)
+            embed.set_footer(text="時間到了會在頻道發送提醒 • 可使用 /kurisu-alarm-list 查看")
+
+            if self.user and self.user.display_avatar:
+                embed.set_thumbnail(url=self.user.display_avatar.url)
+
+            await interaction.response.send_message(embed=embed)
+            logger.info(f"已為 [{user_name}] 設定鬧鐘 ID:{alarm_id}，時間:{formatted_time_str}，內容:「{content}」")
+
+        # 5. 【定時鬧鐘模組】/kurisu-alarm-list 指令
+        @self.tree.command(name="kurisu-alarm-list", description="查看自己名下所有待觸發的定時鬧鐘清單")
+        async def kurisu_alarm_list_command(interaction: discord.Interaction):
+            user_id = str(interaction.user.id)
+            alarms = await AlarmManager.get_pending_alarms(user_id=user_id)
+
+            if not alarms:
+                embed = discord.Embed(
+                    title="⏰【待觸發鬧鐘清單】",
+                    description="（你目前沒有任何待觸發的定時鬧鐘哦！可以使用 `/kurisu-alarm-set` 設定一個。）",
+                    color=0x95A5A6
+                )
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+                return
+
+            embed = discord.Embed(
+                title=f"⏰【{interaction.user.display_name} 的待觸發鬧鐘清單】",
+                description=f"目前共有 **{len(alarms)}** 則等待觸發的定時鬧鐘：",
+                color=0x3498DB
+            )
+            for a in alarms:
+                aid = a["id"]
+                t_str = a["target_time_str"]
+                cnt = a["content"]
+                embed.add_field(name=f"鬧鐘 #{aid} ｜ {t_str}", value=f"內容: {cnt}", inline=False)
+            embed.set_footer(text="若要取消某個鬧鐘，請使用 /kurisu-alarm-cancel <編號>")
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+
+        # 6. 【定時鬧鐘模組】/kurisu-alarm-cancel 指令
+        @self.tree.command(name="kurisu-alarm-cancel", description="取消指定的定時提醒鬧鐘")
+        @app_commands.describe(alarm_id="要取消的鬧鐘編號 (可從 /kurisu-alarm-list 查詢)")
+        async def kurisu_alarm_cancel_command(interaction: discord.Interaction, alarm_id: int):
+            user_id = str(interaction.user.id)
+            success = await AlarmManager.cancel_alarm(alarm_id=alarm_id, user_id=user_id)
+            if success:
+                embed = discord.Embed(
+                    title="🗑️【鬧鐘已取消】",
+                    description=f"鬧鐘 **#{alarm_id}** 已經幫你取消囉！",
+                    color=0xE67E22
+                )
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+            else:
+                embed = discord.Embed(
+                    title="⚠️【取消失敗】",
+                    description=f"找不到編號 **#{alarm_id}** 的待觸發鬧鐘，或者該鬧鐘不是由你設定的！",
+                    color=0xE74C3C
+                )
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+
+        # 7. 【行事曆模組】/kurisu-calendar-set 指令
+        @self.tree.command(name="kurisu-calendar-set", description="【設定 Webhook 行事曆排程】登記日程並支援 Webhook 推送，平日聊天可直接問行程")
+        @app_commands.describe(
+            time="排程時間 (格式: y/m/d/h/m，例如 2026/8/27/15/30、8/27/15/30 或 15:30)",
+            content="具體排程日程事項 (例如: 實驗室進度匯報、客戶會議)",
+            webhook_url="自訂 Webhook URL (選填，若留空則使用預設頻道通知)"
+        )
+        async def kurisu_calendar_set_command(
+            interaction: discord.Interaction,
+            time: str,
+            content: str,
+            webhook_url: Optional[str] = None
+        ):
+            content = content.strip()
+            if not content:
+                await interaction.response.send_message("（排程內容不能是空的啦！請輸入日程事項。）", ephemeral=True)
+                return
+
+            try:
+                target_dt, target_ts, date_str, time_str, formatted_time_str = parse_calendar_time(time)
+            except ValueError as e:
+                embed_err = discord.Embed(
+                    title="⚠️【行事曆時間設定失敗】",
+                    description=f"哼，連時間格式都弄錯了！\n\n{str(e)}",
+                    color=0xE74C3C
+                )
+                embed_err.set_footer(text="格式範例：2026/8/27/15/30、8/27/15/30 或 15:30")
+                await interaction.response.send_message(embed=embed_err, ephemeral=True)
+                return
+
+            channel_id = str(interaction.channel_id) if interaction.channel_id else ""
+            user_id = str(interaction.user.id)
+            user_name = interaction.user.display_name
+            wh_url = (webhook_url or "").strip()
+
+            event_id = await CalendarManager.create_event(
+                channel_id=channel_id,
+                user_id=user_id,
+                user_name=user_name,
+                target_timestamp=target_ts,
+                target_date=date_str,
+                target_time=time_str,
+                target_time_str=formatted_time_str,
+                content=content,
+                webhook_url=wh_url
+            )
+
+            embed = discord.Embed(
+                title="📅【紅莉栖的行事曆已登記】",
+                description=(
+                    f"哼，既然你特地交代了，那我就幫你在行事曆記下來吧！\n"
+                    f"平常聊天時直接問我「今天/某天有什麼行程」，我也會幫你查出來哦！"
+                ),
+                color=0x2ECC71
+            )
+            embed.add_field(name="📌 排程事項", value=f"```{content}```", inline=False)
+            embed.add_field(name="⏳ 預定時間", value=f"`{formatted_time_str}`", inline=True)
+            embed.add_field(name="🔢 排程編號", value=f"`#{event_id}`", inline=True)
+            if wh_url or CALENDAR_WEBHOOK_URL:
+                embed.add_field(name="🌐 Webhook 通知", value="`已啟用自訂 Webhook 推送`", inline=False)
+
+            embed.set_footer(text="時間到達時推送提醒 • 平常聊天可隨時詢問當日排程")
+
+            if self.user and self.user.display_avatar:
+                embed.set_thumbnail(url=self.user.display_avatar.url)
+
+            await interaction.response.send_message(embed=embed)
+            logger.info(f"已為 [{user_name}] 設定行事曆 ID:{event_id}，時間:{formatted_time_str}，內容:「{content}」")
+
+        # 8. 【行事曆模組】/kurisu-calendar-list 指令
+        @self.tree.command(name="kurisu-calendar-list", description="查看自己未來一個月內的所有行事曆排程清單")
+        async def kurisu_calendar_list_command(interaction: discord.Interaction):
+            user_id = str(interaction.user.id)
+            events = await CalendarManager.get_upcoming_events(user_id=user_id, days=30, limit=20)
+
+            if not events:
+                embed = discord.Embed(
+                    title="📅【行事曆待辦清單】",
+                    description="（你目前沒有任何排程哦！可以使用 `/kurisu-calendar-set` 設定一個。）",
+                    color=0x95A5A6
+                )
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+                return
+
+            embed = discord.Embed(
+                title=f"📅【{interaction.user.display_name} 的行事曆排程清單】",
+                description=f"目前共有 **{len(events)}** 則待辦排程：\n*（提示：平常對話直接問我「今天有什麼行程」我也能回答你哦！）*",
+                color=0x3498DB
+            )
+            for e in events:
+                eid = e["id"]
+                t_str = e["target_time_str"]
+                cnt = e["content"]
+                wh_tag = " [🌐Webhook]" if e.get("webhook_url") else ""
+                embed.add_field(name=f"排程 #{eid} ｜ {t_str}{wh_tag}", value=f"內容: {cnt}", inline=False)
+            embed.set_footer(text="若要取消某個排程，請使用 /kurisu-calendar-cancel <編號>")
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+
+        # 9. 【行事曆模組】/kurisu-calendar-cancel 指令
+        @self.tree.command(name="kurisu-calendar-cancel", description="取消指定的行事曆排程")
+        @app_commands.describe(event_id="要取消的排程編號 (可從 /kurisu-calendar-list 查詢)")
+        async def kurisu_calendar_cancel_command(interaction: discord.Interaction, event_id: int):
+            user_id = str(interaction.user.id)
+            success = await CalendarManager.cancel_event(event_id=event_id, user_id=user_id)
+            if success:
+                embed = discord.Embed(
+                    title="🗑️【排程已取消】",
+                    description=f"行事曆排程 **#{event_id}** 已經幫你取消囉！",
+                    color=0xE67E22
+                )
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+            else:
+                embed = discord.Embed(
+                    title="⚠️【取消失敗】",
+                    description=f"找不到編號 **#{event_id}** 的待觸發排程，或者該排程不是由你設定的！",
+                    color=0xE74C3C
+                )
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+
     async def on_ready(self):
         logger.info(f"✨ 機器人登入成功！身份: {self.user} (ID: {self.user.id})")
         logger.info(f"🎭 機器人人設名稱: {BOT_NAME}")
         logger.info(f"💬 回覆頻道列表 (REPLY_CHANNEL_IDS): {REPLY_CHANNEL_IDS or '全部頻道 (無限制)'}")
         logger.info(f"👂 純監聽頻道列表 (LISTEN_CHANNEL_IDS): {LISTEN_CHANNEL_IDS or '無'}")
 
-        # 在 Bot 登入完成且獲取 application_id 後同步全域 Slash 指令樹
+        # 啟動獨立定時鬧鐘與行事曆後台調度器
+        self.alarm_scheduler.start()
+        self.calendar_scheduler.start()
+
+        # 同步全域 Slash 指令樹
         try:
             synced = await self.tree.sync()
             logger.info(f"⚡ [Slash Commands] 已成功向 Discord 全域同步 {len(synced)} 個指令: {[cmd.name for cmd in synced]}")
@@ -167,28 +396,41 @@ class FriendBotClient(discord.Client):
             color=0x2ECC71
         )
         embed.add_field(
+            name="⏰ `/kurisu-alarm-set <時間> <提醒內容>`",
+            value=(
+                "**【定時鬧鐘提醒】**\n"
+                "設定專屬提醒鬧鈴，在指定時刻以紅莉栖專屬傲嬌對白提醒你。\n"
+                "*管理：`/kurisu-alarm-list` ｜ `/kurisu-alarm-cancel <編號>`*"
+            ),
+            inline=False
+        )
+        embed.add_field(
+            name="📅 `/kurisu-calendar-set <時間> <排程內容> [webhook_url]`",
+            value=(
+                "**【Webhook 行事曆排程】**\n"
+                "登記行事曆日程，支援 Webhook 推送，且**日常聊天問我『今天有什麼行程』也會自動回答你**！\n"
+                "*管理：`/kurisu-calendar-list` ｜ `/kurisu-calendar-cancel <編號>`*"
+            ),
+            inline=False
+        )
+        embed.add_field(
             name="🔍 `/kurisu-search <查詢內容>`",
-            value="**【強制線上搜尋】**\n當你想獲取即時時事、最新新聞或查證最新資訊時使用。\n*範例：`/kurisu-search 台北現在天氣`、`/kurisu-search 2026年最新科技新聞`*",
+            value="**【強制線上搜尋】**\n當你想獲取即時時事、最新新聞或查證最新資訊時使用。\n*範例：`/kurisu-search 台北現在天氣`*",
             inline=False
         )
         embed.add_field(
             name="🧠 `/kurisu-profile [用戶]`",
-            value="**【查詢用戶個人畫像】**\n查看機器人為你或指定群友建立的長期特徵、喜好與互動印象（支援選單直接選擇群友）。\n*範例：`/kurisu-profile`、`/kurisu-profile @群友`*",
+            value="**【查詢用戶個人畫像】**\n查看機器人為你或指定群友建立的長期特徵、喜好與互動印象。\n*範例：`/kurisu-profile`*",
             inline=False
         )
         embed.add_field(
-            name="💬 `日常直接對話`",
-            value="**【自然群友聊天】**\n直接在頻道內發送文字或上傳圖片，我會自動結合上下文、歷史回憶與個人畫像進行幽默互動。",
-            inline=False
-        )
-        embed.add_field(
-            name="❓ `/kurisu-help`",
-            value="**【功能說明】**\n呼叫出這張指令指南卡片。",
+            name="💬 `日常直接對話（支援行事曆查詢）`",
+            value="**【自然群友聊天】**\n直接在頻道內聊天或問我「**我今天有什麼行程？**」、「**明天我有安排嗎？**」，我會自動調閱行事曆回答你！",
             inline=False
         )
         if self.user and self.user.display_avatar:
             embed.set_thumbnail(url=self.user.display_avatar.url)
-        embed.set_footer(text=f"{BOT_NAME} • Three-Tier Memory & Tool Calling Enabled")
+        embed.set_footer(text=f"{BOT_NAME} • Modular Alarm & Webhook Calendar Enabled")
         return embed
 
     def _create_profile_embed(
@@ -198,7 +440,6 @@ class FriendBotClient(discord.Client):
         profile: Optional[dict],
         target_user: Optional[discord.User] = None
     ) -> discord.Embed:
-        """產生 Profile 指令的 Embed 說明卡片"""
         if not profile:
             embed = discord.Embed(
                 title=f"📋 個人畫像檔案：{target_user_name}",
@@ -230,7 +471,6 @@ class FriendBotClient(discord.Client):
         return embed
 
     async def on_message(self, message: discord.Message):
-        # 1. 忽略機器人自身與其他機器人的發言
         if message.author.bot or message.author == self.user:
             return
 
@@ -238,17 +478,13 @@ class FriendBotClient(discord.Client):
         is_reply_channel = (not REPLY_CHANNEL_IDS) or (channel_id in REPLY_CHANNEL_IDS)
         is_listen_channel = channel_id in LISTEN_CHANNEL_IDS
 
-        # 若不在回覆頻道，也不在監聽頻道，則直接略過
         if not is_reply_channel and not is_listen_channel:
             return
 
         content = message.clean_content.strip()
-
-        # 2. 下載圖片附件（若有）
         images, mime_types = await download_image_attachments(message)
         has_image = bool(images)
 
-        # 若無文字也無圖片，略過
         if not content and not has_image:
             return
 
@@ -257,7 +493,6 @@ class FriendBotClient(discord.Client):
         msg_id = str(message.id)
         current_ts = int(message.created_at.timestamp() if message.created_at else time.time())
 
-        # 3. 【永久儲存】將收到的對話訊息寫入資料庫與 FTS5
         await MemoryManager.save_message(
             message_id=msg_id,
             channel_id=str(channel_id),
@@ -269,7 +504,6 @@ class FriendBotClient(discord.Client):
             timestamp=current_ts
         )
 
-        # 4. 【純監聽模式處理】若僅為監聽頻道且非回覆頻道：默默記錄記憶，不發言
         if is_listen_channel and not is_reply_channel:
             logger.debug(f"[監聽模式] 記錄頻道 #{message.channel.name} 訊息 - {user_name}")
             if content:
@@ -282,18 +516,14 @@ class FriendBotClient(discord.Client):
                 )
             return
 
-        # 5. 【回覆頻道處理】調用三層記憶並透過 Gemini 生成幽默回覆
         async def process_chat():
             logger.info(f"收到來自 [{user_name}] 的對話訊息 (頻道: #{message.channel.name if hasattr(message.channel, 'name') else channel_id})")
             
-            # A. 取出短期記憶
             short_term = await MemoryManager.get_short_term_context(str(channel_id))
             recent_msg_ids = [str(m.get("message_id")) for m in short_term if m.get("message_id")]
-
-            # B. 取出發言用戶長期畫像
             user_profile = await MemoryManager.get_user_profile(user_id)
+            calendar_summary = await CalendarManager.get_user_schedule_summary(user_id)
 
-            # C. 取出跨頻道深度回憶
             deep_history = []
             if ENABLE_HISTORY_RECALL and content:
                 deep_history = await MemoryManager.recall_deep_history(
@@ -301,12 +531,12 @@ class FriendBotClient(discord.Client):
                     exclude_message_ids=recent_msg_ids
                 )
 
-            # D. 組裝上下文 Prompt
             memory_context = format_memory_context(
                 current_user_name=user_name,
                 user_profile=user_profile,
                 deep_history=deep_history,
-                short_term_history=short_term
+                short_term_history=short_term,
+                calendar_summary=calendar_summary
             )
 
             prompt = f"""{memory_context}
@@ -316,14 +546,12 @@ class FriendBotClient(discord.Client):
 
 請以幽默風趣的群友風格回應 {user_name}："""
 
-            # E. 呼叫 Gemini 生成回覆
             response_text = await self.gemini.generate_response(
                 prompt=prompt,
                 images=images if images else None,
                 image_mime_types=mime_types if mime_types else None
             )
 
-            # F. 自然語意多氣泡切分並逐段發送
             chunks = split_message(response_text)
             sent_messages = []
             for idx, chunk in enumerate(chunks):
@@ -341,7 +569,6 @@ class FriendBotClient(discord.Client):
                 sent_msg = await message.channel.send(chunk)
                 sent_messages.append(sent_msg)
 
-            # G. 儲存機器人回覆
             combined_reply = "\n".join([m.content for m in sent_messages])
             primary_msg = sent_messages[0] if sent_messages else None
             if primary_msg:
@@ -358,7 +585,6 @@ class FriendBotClient(discord.Client):
 
             logger.info(f"已回覆 [{user_name}] 的訊息 (共 {len(chunks)} 則訊息氣泡)")
 
-            # H. 背景非同步提煉畫像
             if content:
                 asyncio.create_task(
                     self.memory_extractor.extract_and_update(
@@ -368,7 +594,6 @@ class FriendBotClient(discord.Client):
                     )
                 )
 
-        # 執行生成並維持 Typing 狀態
         try:
             if SHOW_TYPING:
                 async with message.channel.typing():

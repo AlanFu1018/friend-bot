@@ -69,9 +69,9 @@ _chat_behavior_cfg = _yaml_config.get("chat_behavior", {})
 ENABLE_MULTI_BUBBLE: bool = bool(_chat_behavior_cfg.get("enable_multi_bubble", True))
 BUBBLE_TARGET_LENGTH: int = int(_chat_behavior_cfg.get("bubble_target_length", 120))
 _typing_delay_cfg = _chat_behavior_cfg.get("typing_delay_range", [0.6, 1.3])
-TYPING_DELAY_RANGE: Tuple[float, float] = (
-    float(_typing_delay_cfg[0]) if len(_typing_delay_cfg) > 0 else 0.6,
-    float(_typing_delay_cfg[1]) if len(_typing_delay_cfg) > 1 else 1.3,
+TYPING_DELAY_RANGE: Tuple[float, float] = (\
+    float(_typing_delay_cfg[0]) if len(_typing_delay_cfg) > 0 else 0.6,\
+    float(_typing_delay_cfg[1]) if len(_typing_delay_cfg) > 1 else 1.3,\
 )
 
 # 4. 聯網搜尋 (Web Search) 設定
@@ -80,13 +80,18 @@ ENABLE_WEB_SEARCH: bool = bool(_web_cfg.get("enable_web_search", True))
 SEARCH_TOP_K: int = int(_web_cfg.get("search_top_k", 3))
 MAX_CONTENT_LENGTH_PER_PAGE: int = int(_web_cfg.get("max_content_length_per_page", 2500))
 
-# 5. Gemini 模型設定
+# 5. 行事曆與 Webhook 設定
+_cal_cfg = _yaml_config.get("calendar", {})
+CALENDAR_WEBHOOK_URL: str = os.getenv("CALENDAR_WEBHOOK_URL", _cal_cfg.get("webhook_url", "")).strip()
+CALENDAR_AVATAR_URL: str = os.getenv("CALENDAR_AVATAR_URL", _cal_cfg.get("avatar_url", "")).strip()
+
+# 6. Gemini 模型設定
 _gemini_cfg = _yaml_config.get("gemini", {})
 GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", _gemini_cfg.get("model", "gemini-3.1-flash-lite"))
 GEMINI_TEMPERATURE: float = float(_gemini_cfg.get("temperature", 0.85))
 GEMINI_MAX_OUTPUT_TOKENS: int = int(_gemini_cfg.get("max_output_tokens", 2048))
 
-# 6. 記憶系統設定
+# 7. 記憶系統設定
 _mem_cfg = _yaml_config.get("memory", {})
 SHORT_TERM_HISTORY_LIMIT: int = int(_mem_cfg.get("short_term_history_limit", 15))
 ENABLE_AUTO_MEMORY_EXTRACTION: bool = bool(_mem_cfg.get("enable_auto_memory_extraction", True))
@@ -94,7 +99,7 @@ ENABLE_HISTORY_RECALL: bool = bool(_mem_cfg.get("enable_history_recall", True))
 HISTORY_RECALL_LIMIT: int = int(_mem_cfg.get("history_recall_limit", 4))
 DB_PATH: str = str(BASE_DIR / _mem_cfg.get("db_path", "data/friend_bot.db"))
 
-# 7. Persona 與 System Prompt 設定（從 .md 檔案載入）
+# 8. Persona 與 System Prompt 設定（從 .md 檔案載入）
 _persona_cfg = _yaml_config.get("persona", {})
 BOT_NAME: str = _persona_cfg.get("bot_name", "群友小助手")
 

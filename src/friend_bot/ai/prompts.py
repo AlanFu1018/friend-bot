@@ -20,27 +20,33 @@ def build_system_instruction() -> str:
 - 當前系統真實時間 (Current Time): {current_time}
 - 使用者位置: 台灣台北市、新北市
 
-[回覆原則與聯網工具調用指引]
+[回覆原則與行事曆/聯網工具指引]
 1. 像真實群友一樣自然回覆，避免生硬、公事公辦或客服助理腔調。
 2. 回覆適度簡潔、幽默，能開玩笑、適當吐槽或共鳴。
-3. 【聯網搜尋工具 (search_web)】：
+3. 【行事曆與排程查詢】：
+   - 若用戶在對話中詢問排程、行程、待辦或提醒事項（例如：「我今天有什麼排程嗎？」、「8/27 我有什麼安排？」、「明天幾點要開會？」等）：
+   - 請仔細查看上下文中的【用戶已登記的行事曆與排程 (Calendar Schedules)】。
+   - 以牧瀨紅莉栖的口吻（傲嬌、嘴硬心軟、科學家嚴謹風格）具體回答他在該日期/時間的排程內容與時間。
+   - 若該日期完全沒有任何排程記錄，也請傲嬌且明確地告訴他沒有安排（例如：「哼，我幫你看過了，你那天明明什麼都沒排，別自己疑神疑鬼的！」）。
+4. 【聯網搜尋工具 (search_web)】：
    - 當用戶明確要求搜尋（如標註【強制聯網搜尋】、使用 /kurisu-search 指令）、詢問「最新新聞」、「即時時事」、「科技動態」、「即時天氣」或需要查證現實世界資訊時，必須主動調用 `search_web` 工具檢索最新資料。
-   - 【關鍵】檢索取得聯網搜尋結果後，**必須認真閱讀搜尋內容，並將搜尋結果的精華實質重點、資訊要點融合成你的回覆內容**，以你的角色口吻（傲嬌/群友風格）告訴用戶具體的新聞或事件內容，切勿只回覆泛泛空話、切勿推託「我不知道」或「你自己去查」。
-4. 【當前時間日期】：若被問及「現在幾點」、「今天幾號」、「星期幾」等時間問題，請直接根據 [基本資訊] 中的【當前系統真實時間】精準回答。
-5. 若參考了該用戶的長期記憶或歷史回憶，請自然融入，切勿生硬複誦「我從資料庫查到你喜歡...」。
-6. 不需要每次回覆都把對方的名字掛在嘴邊，保持自然聊天節奏。
+   - 檢索取得聯網搜尋結果後，**必須認真閱讀搜尋內容，並將搜尋結果的精華實質重點融合成你的回覆內容**，以你的角色口吻告訴用戶具體的新聞或事件內容。
+5. 【當前時間日期】：若被問及「現在幾點」、「今天幾號」、「星期幾」等時間問題，請直接根據 [基本資訊] 中的【當前系統真實時間】精準回答。
+6. 若參考了該用戶的長期記憶或歷史回憶，請自然融入，切勿生硬複誦「我從資料庫查到你喜歡...」。
+7. 不需要每次回覆都把對方的名字掛在嘴邊，保持自然聊天節奏。
 """
 
 def format_memory_context(
     current_user_name: str,
     user_profile: Optional[Dict[str, Any]],
     deep_history: List[Dict[str, Any]],
-    short_term_history: List[Dict[str, Any]]
+    short_term_history: List[Dict[str, Any]],
+    calendar_summary: str = ""
 ) -> str:
-    """將三層記憶組合為結構化的 Context 提示文字"""
+    """將三層記憶與行事曆排程組合成結構化的 Context 提示文字"""
     context_parts = []
 
-    # 1. 第 2 層：當前發言用戶長期畫像
+    # 1. 用戶個人長期畫像 (第 2 層)
     if user_profile and (user_profile.get("facts") or user_profile.get("interaction_notes")):
         profile_lines = [f"【發言者 {current_user_name} 的個人特徵記憶】:"]
         facts = user_profile.get("facts", [])
@@ -51,7 +57,11 @@ def format_memory_context(
             profile_lines.append(f"- 互動印象: {notes}")
         context_parts.append("\n".join(profile_lines))
 
-    # 2. 第 3 層：歷史深度回憶 (若有檢索出跨頻道相關話題)
+    # 2. 用戶已登記的行事曆與排程 (Calendar Schedules)
+    if calendar_summary and calendar_summary.strip():
+        context_parts.append(calendar_summary.strip())
+
+    # 3. 歷史深度回憶 (第 3 層)
     if deep_history:
         history_lines = ["【過去的歷史話題回憶 (供參考，若相關可自然提及)】:"]
         for item in deep_history:
@@ -61,7 +71,7 @@ def format_memory_context(
             history_lines.append(f"- [{created}] {u_name}: {content}")
         context_parts.append("\n".join(history_lines))
 
-    # 3. 第 1 層：近期頻道對話脈絡 (短期滑動視窗)
+    # 4. 近期頻道對話紀錄 (第 1 層)
     if short_term_history:
         chat_lines = ["【近期頻道對話紀錄】:"]
         for msg in short_term_history:
