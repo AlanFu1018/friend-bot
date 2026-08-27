@@ -30,13 +30,25 @@ async def init_db():
             has_image INTEGER DEFAULT 0,
             is_bot INTEGER DEFAULT 0,
             timestamp INTEGER NOT NULL,
+            extracted INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         """)
 
-        # 索引優化：依頻道快速查詢近期訊息，依用戶快速查詢發言
+        # 遷移檢查：若舊表沒有 extracted 欄位，動態補上
+        try:
+            cursor = await db.execute("PRAGMA table_info(messages);")
+            columns = [row["name"] for row in await cursor.fetchall()]
+            if "extracted" not in columns:
+                await db.execute("ALTER TABLE messages ADD COLUMN extracted INTEGER DEFAULT 0;")
+                logger.info("已為 messages 表新增 extracted 欄位")
+        except Exception as e:
+            logger.debug(f"messages 欄位檢查: {e}")
+
+        # 索引優化：依頻道快速查詢近期訊息，依用戶快速查詢發言，依未提煉狀態快速檢索
         await db.execute("CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel_id, id DESC);")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_messages_user ON messages(user_id);")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_messages_unextracted ON messages(channel_id, extracted, id ASC);")
 
         # 2. 全文搜尋虛擬表 (FTS5) - 用於跨歷史深度話題回憶
         try:
@@ -85,7 +97,7 @@ async def init_db():
 
         # 相容視圖或舊表
         await db.execute("""
-        CREATE TABLE IF NOT EXISTS alarms (
+        CREATE TABLE IF NOT EXISTS alarms (\
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             channel_id TEXT NOT NULL,
             user_id TEXT NOT NULL,

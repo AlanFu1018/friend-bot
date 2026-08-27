@@ -4,7 +4,7 @@ import logging
 import asyncio
 import time
 import random
-from typing import Optional
+from typing import Optional, List
 from src.friend_bot.core.config import (
     BOT_NAME,
     ENABLE_HISTORY_RECALL,
@@ -24,7 +24,7 @@ from src.friend_bot.bot.handlers import download_image_attachments, split_messag
 logger = logging.getLogger("friend_bot.bot")
 
 class FriendBotClient(discord.Client):
-    """Discord Bot 客戶端（支援 /kurisu- 原生斜線指令、獨立定時鬧鐘與 Webhook 行事曆排程系統）"""
+    """Discord Bot 客戶端（支援 /kurisu- 原生斜線指令、獨立定時鬧鐘、Webhook 行事曆排程與多人多維記憶系統）"""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -61,7 +61,15 @@ class FriendBotClient(discord.Client):
             user_name = interaction.user.display_name
 
             short_term = await MemoryManager.get_short_term_context(channel_id) if channel_id else []
-            user_profile = await MemoryManager.get_user_profile(user_id)
+            
+            # 多人記憶解析 (A + B + C 混合方案)
+            current_user_profile, other_user_profiles = await MemoryManager.resolve_multi_user_profiles(
+                current_user_id=user_id,
+                content=query,
+                short_term_history=short_term,
+                max_others=3
+            )
+
             calendar_summary = await CalendarManager.get_user_schedule_summary(user_id)
             deep_history = []
             if ENABLE_HISTORY_RECALL:
@@ -69,10 +77,11 @@ class FriendBotClient(discord.Client):
 
             memory_context = format_memory_context(
                 current_user_name=user_name,
-                user_profile=user_profile,
+                user_profile=current_user_profile,
                 deep_history=deep_history,
                 short_term_history=short_term,
-                calendar_summary=calendar_summary
+                calendar_summary=calendar_summary,
+                other_user_profiles=other_user_profiles
             )
 
             prompt = f"""{memory_context}
@@ -98,7 +107,8 @@ class FriendBotClient(discord.Client):
                     content=query,
                     has_image=False,
                     is_bot=False,
-                    timestamp=current_ts
+                    timestamp=current_ts,
+                    extracted=True
                 )
 
                 sent_chunks = [chunks[0]]
@@ -123,14 +133,16 @@ class FriendBotClient(discord.Client):
                     content="\n".join(sent_chunks),
                     has_image=False,
                     is_bot=True,
-                    timestamp=int(time.time())
+                    timestamp=int(time.time()),
+                    extracted=True
                 )
 
                 asyncio.create_task(
                     self.memory_extractor.extract_and_update(
                         user_id=user_id,
                         user_name=user_name,
-                        recent_messages=[query]
+                        recent_messages=[query],
+                        other_users=other_user_profiles
                     )
                 )
 
@@ -148,7 +160,7 @@ class FriendBotClient(discord.Client):
             logger.info(f"已向 [{interaction.user.display_name}] 透過 /kurisu-profile 顯示 [{target_user_name}] 的畫像")
 
         # 4. 【定時鬧鐘模組】/kurisu-alarm-set 指令
-        @self.tree.command(name="kurisu-alarm-set", description="【設定定時提醒鬧鐘】紅莉栖會在指定時間以傲嬌風格發送醒目提醒")
+        @self.tree.command(name="kurisu-alarm-set", description="【設定定時提醒鬧鐘】紅莉栖會在指定時間以傲嬌風格發送醒目標題提醒")
         @app_commands.describe(
             time="提醒時間 (格式: y/m/d/h/m，例如 2026/8/27/15/30、8/27/15/30 或 15:30)",
             content="要提醒的具體事項內容 (例如: 搶特展門票、吃藥、開會)"
@@ -424,13 +436,13 @@ class FriendBotClient(discord.Client):
             inline=False
         )
         embed.add_field(
-            name="💬 `日常直接對話（支援行事曆查詢）`",
-            value="**【自然群友聊天】**\n直接在頻道內聊天或問我「**我今天有什麼行程？**」、「**明天我有安排嗎？**」，我會自動調閱行事曆回答你！",
+            name="💬 `日常直接對話（支援行事曆查詢與多人群友識別）`",
+            value="**【自然群友聊天】**\n直接在頻道內聊天，問我行程，或是**提及其他群友**，我會自動調閱多人群友記憶並精準吐槽回應！",
             inline=False
         )
         if self.user and self.user.display_avatar:
             embed.set_thumbnail(url=self.user.display_avatar.url)
-        embed.set_footer(text=f"{BOT_NAME} • Modular Alarm & Webhook Calendar Enabled")
+        embed.set_footer(text=f"{BOT_NAME} • Multi-User Memory & Webhook Calendar Enabled")
         return embed
 
     def _create_profile_embed(
@@ -493,6 +505,7 @@ class FriendBotClient(discord.Client):
         msg_id = str(message.id)
         current_ts = int(message.created_at.timestamp() if message.created_at else time.time())
 
+        # 1. 永久寫入資料庫（純監聽頻道 extracted=0，待批次處理）
         await MemoryManager.save_message(
             message_id=msg_id,
             channel_id=str(channel_id),
@@ -501,29 +514,63 @@ class FriendBotClient(discord.Client):
             content=content or "[上傳了圖片]",
             has_image=has_image,
             is_bot=False,
-            timestamp=current_ts
+            timestamp=current_ts,
+            extracted=False
         )
 
+        # 2. 純監聽頻道處理（方案 C：加入防抖隊列，累積滿或靜默定時批次提煉）
         if is_listen_channel and not is_reply_channel:
-            logger.debug(f"[監聽模式] 記錄頻道 #{message.channel.name} 訊息 - {user_name}")
-            if content:
-                asyncio.create_task(
-                    self.memory_extractor.extract_and_update(
-                        user_id=user_id,
-                        user_name=user_name,
-                        recent_messages=[content]
-                    )
-                )
+            logger.debug(f"[監聽模式] 記錄頻道 #{message.channel.name if hasattr(message.channel, 'name') else channel_id} 訊息 - {user_name}")
+            self.memory_extractor.add_to_listen_queue(
+                str(channel_id),
+                {
+                    "message_id": msg_id,
+                    "channel_id": str(channel_id),
+                    "user_id": user_id,
+                    "user_name": user_name,
+                    "content": content or "[上傳了圖片]",
+                    "has_image": has_image,
+                    "timestamp": current_ts
+                }
+            )
             return
+
+        # 3. 主回覆頻道對話處理
+        # 解析顯式 Mention / 回覆對象 ID 列表 (方案 A)
+        explicit_mentioned_ids: List[str] = []
+        if message.mentions:
+            for m_user in message.mentions:
+                if not m_user.bot and m_user.id != self.user.id and str(m_user.id) != user_id:
+                    explicit_mentioned_ids.append(str(m_user.id))
+
+        if message.reference and message.reference.resolved and hasattr(message.reference.resolved, "author"):
+            ref_author = message.reference.resolved.author
+            if not ref_author.bot and ref_author.id != self.user.id and str(ref_author.id) != user_id:
+                explicit_mentioned_ids.append(str(ref_author.id))
 
         async def process_chat():
             logger.info(f"收到來自 [{user_name}] 的對話訊息 (頻道: #{message.channel.name if hasattr(message.channel, 'name') else channel_id})")
             
+            # A. JIT 按需統合：若該發言者在監聽頻道有未消化的發言，觸發背景非同步消化
+            asyncio.create_task(self.memory_extractor.process_user_unextracted_messages(user_id))
+
+            # B. 取出短期記憶
             short_term = await MemoryManager.get_short_term_context(str(channel_id))
             recent_msg_ids = [str(m.get("message_id")) for m in short_term if m.get("message_id")]
-            user_profile = await MemoryManager.get_user_profile(user_id)
+
+            # C. 多人記憶檢索 (A + B + C 混合方案)
+            current_user_profile, other_user_profiles = await MemoryManager.resolve_multi_user_profiles(
+                current_user_id=user_id,
+                content=content,
+                explicit_mentioned_user_ids=explicit_mentioned_ids,
+                short_term_history=short_term,
+                max_others=3
+            )
+
+            # D. 取出發言用戶的行事曆排程摘要
             calendar_summary = await CalendarManager.get_user_schedule_summary(user_id)
 
+            # E. 跨頻道深度回憶
             deep_history = []
             if ENABLE_HISTORY_RECALL and content:
                 deep_history = await MemoryManager.recall_deep_history(
@@ -531,12 +578,14 @@ class FriendBotClient(discord.Client):
                     exclude_message_ids=recent_msg_ids
                 )
 
+            # F. 組裝包含發言者與關係人畫像的 Prompt Context
             memory_context = format_memory_context(
                 current_user_name=user_name,
-                user_profile=user_profile,
+                user_profile=current_user_profile,
                 deep_history=deep_history,
                 short_term_history=short_term,
-                calendar_summary=calendar_summary
+                calendar_summary=calendar_summary,
+                other_user_profiles=other_user_profiles
             )
 
             prompt = f"""{memory_context}
@@ -580,7 +629,8 @@ class FriendBotClient(discord.Client):
                     content=combined_reply,
                     has_image=False,
                     is_bot=True,
-                    timestamp=int(primary_msg.created_at.timestamp() if primary_msg.created_at else time.time())
+                    timestamp=int(primary_msg.created_at.timestamp() if primary_msg.created_at else time.time()),
+                    extracted=True
                 )
 
             logger.info(f"已回覆 [{user_name}] 的訊息 (共 {len(chunks)} 則訊息氣泡)")
@@ -590,7 +640,8 @@ class FriendBotClient(discord.Client):
                     self.memory_extractor.extract_and_update(
                         user_id=user_id,
                         user_name=user_name,
-                        recent_messages=[content]
+                        recent_messages=[content],
+                        other_users=other_user_profiles
                     )
                 )
 
