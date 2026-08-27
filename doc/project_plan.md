@@ -8,4 +8,4 @@
 | **Phase 6** | **Discord 原生 Slash 指令** | • 實作 `/kurisu-help`、`/kurisu-search`、`/kurisu-profile`<br>• 實作 `/kurisu-alarm-*` 與 `/kurisu-calendar-*` 全套指令 | ✅ 已完成 |
 | **Phase 7** | **測試與全模組自動化驗證** | • 實作 `test/tests_verify.py`，涵蓋 9 大核心測試用例，100% 測試通過 | ✅ 已完成 |
 | **Phase 8** | **動態好感度與人際進展系統** | • 實作 4 階 Tier 傲嬌防線進展與 Prompt 動態注入<br>• 實作隱密更新機制（無任何系統訊息干擾聊天，僅 `/kurisu-profile` 顯示）<br>• 支援 `config.yaml` 配置每日好感上限 `daily_gain_limit`<br>• 通過 11 項全自動化測試驗證 | ✅ 已完成 |
-| **Phase 9** | **多人群聊短時熱絡 (Burst) 與動態引用回覆** | • 設計 4.5s 時間窗口與多用戶 (>= 2 人) 防抖收集隊列<br>• 由 AI 語意自選主要回應目標，採用 Discord 原生 Reply 引用效果<br>• 撰寫詳細計畫文件 `doc/multi_user_burst_reply_plan.md` | 📝 規劃中 (Pending) |
+| **Phase 9** | **多人群聊短時熱絡 (Burst) 與動態引用回覆** | • 實作 4.5s 時間窗口與多用戶 (>= 2 人) 防抖收集隊列 `BurstBufferManager`<br>• 實作 AI 自選主要回應目標與 Discord 原生 `target_message.reply()` 效果<br>• 支援多人批次消化提煉與好感度維護<br>• 通過 13 項全自動化測試驗證 | ✅ 已完成 |

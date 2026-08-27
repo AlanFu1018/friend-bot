@@ -74,6 +74,13 @@ TYPING_DELAY_RANGE: Tuple[float, float] = (
     float(_typing_delay_cfg[1]) if len(_typing_delay_cfg) > 1 else 1.3,
 )
 
+# 3.1 多人群聊短時熱絡 (Burst) 聚合設定
+_burst_cfg = _chat_behavior_cfg.get("burst_reply", {})
+ENABLE_BURST_REPLY: bool = bool(_burst_cfg.get("enable_burst_reply", True))
+BURST_WINDOW_SECONDS: float = float(_burst_cfg.get("window_seconds", 4.5))
+BURST_MIN_USER_COUNT: int = int(_burst_cfg.get("min_user_count", 2))
+BURST_MAX_MESSAGES: int = int(_burst_cfg.get("max_burst_messages", 5))
+
 # 4. 聯網搜尋 (Web Search) 設定
 _web_cfg = _yaml_config.get("web_search", {})
 ENABLE_WEB_SEARCH: bool = bool(_web_cfg.get("enable_web_search", True))

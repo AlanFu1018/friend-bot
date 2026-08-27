@@ -1,5 +1,6 @@
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
+import re
 from src.friend_bot.core.config import SYSTEM_PROMPT, BOT_NAME, ENABLE_FAVORABILITY
 
 # 4 階 Tier 傲嬌態度動態指令對照表
@@ -62,7 +63,7 @@ def format_memory_context(
 
     # 1. 發言者個人長期畫像與好感度態度指引 (第 2 層)
     if user_profile:
-        profile_lines = [f"【發言者 {current_user_name} 的個人特徵記憶】:"]
+        profile_lines = [f"【主要發言者 {current_user_name} 的個人特徵記憶】:"]
         
         # 好感度態度動態注入
         tier = user_profile.get("relationship_tier", "familiar")
@@ -90,6 +91,8 @@ def format_memory_context(
             note_str = o_notes if o_notes else "尚無特別印象"
             
             other_lines.append(f"- 用戶名稱: {o_name} (關係階級: {o_tier})")
+            if ENABLE_FAVORABILITY and o_tier in TIER_ATTITUDE_MAP:
+                other_lines.append(f"  • {TIER_ATTITUDE_MAP[o_tier]}")
             other_lines.append(f"  • 已知特徵: {fact_str}")
             other_lines.append(f"  • 互動印象: {note_str}")
         context_parts.append("\n".join(other_lines))
@@ -121,6 +124,54 @@ def format_memory_context(
         context_parts.append("\n".join(chat_lines))
 
     return "\n\n".join(context_parts)
+
+def build_burst_dialogue_prompt(
+    memory_context: str,
+    burst_messages: List[Dict[str, Any]]
+) -> str:
+    """
+    建立【多人群聊短時熱絡 (Burst) 聚合回覆】專用 Prompt。
+    引導模型在開頭輸出 [TARGET_ID: <message_id>] 標記引用目標，並生成兼顧多人語境的傲嬌回覆。
+    """
+    msg_lines = []
+    for idx, m in enumerate(burst_messages, start=1):
+        m_id = str(m.get("message_id", ""))
+        u_name = m.get("user_name", "群友")
+        content = m.get("content", "")
+        has_img = " [附圖]" if m.get("has_image") else ""
+        msg_lines.append(f"{idx}. [ID: {m_id}] {u_name}: {content}{has_img}")
+
+    burst_block = "\n".join(msg_lines)
+    default_target_id = str(burst_messages[-1].get("message_id", "")) if burst_messages else ""
+
+    return f"""{memory_context}
+
+【💬 多人群聊即時熱烈討論 (短時間內有多位群友連續發言)】:
+{burst_block}
+
+【回覆指導原則】：
+1. 這是一段多人同時搶話/熱烈聊天的場景。請你在回覆時：
+   - 第一行必須明確標記你主要想要「引用回覆（Reply）」的訊息 ID，格式為：`[TARGET_ID: <message_id>]`。
+   - 緊接著在下一行開始輸出你的回覆文字。
+2. 你的回覆應當**主要聚焦於該被引用的訊息/群友**（解答、反駁、傲嬌吐槽），但**同時可極為自然地順手吐槽或兼顧在場其他群友的發言**，展現立體的群友默契。
+3. 保持牧瀨紅莉栖的傲嬌/理性/幽默群友性格。
+
+請生成回覆（開頭務必包含 [TARGET_ID: 訊息ID] 標籤）："""
+
+def parse_burst_reply_response(raw_text: str, default_target_id: str = "") -> Tuple[str, str]:
+    """
+    解析 Burst 回覆文字，提取 target_message_id 與純回覆內容。
+    回傳: (target_message_id, reply_content)
+    """
+    cleaned = raw_text.strip()
+    match = re.search(r'\[TARGET_ID:\s*([a-zA-Z0-9_\-]+)\]', cleaned, re.IGNORECASE)
+    if match:
+        target_id = match.group(1).strip()
+        # 移除標籤部分
+        content = re.sub(r'\[TARGET_ID:\s*([a-zA-Z0-9_\-]+)\]', '', cleaned, flags=re.IGNORECASE).strip()
+        return target_id, content
+    
+    return default_target_id, cleaned
 
 def build_multi_entity_extraction_prompt(
     speaker: Dict[str, Any],
@@ -182,13 +233,6 @@ def build_multi_entity_extraction_prompt(
    - 「主觀評價/他人調侃/社交行為/對話風格」放入 "interaction_notes"。
 5. 【輸出規範】：
    - 輸出嚴格的 JSON 物件，包含 "updates" 陣列。
-   - 每個 update 物件格式：
-     * "user_id": 該用戶的 ID
-     * "user_name": 用戶名稱
-     * "facts": [本次新發現的事實列表，無則為 []]
-     * "remove_facts": [明確需要移除/更正的舊事實列表，無則為 []]
-     * "interaction_notes": 綜合更新後的整體互動印象字串
-     * "favorability_delta": 好感度增減數值（整數 -2 ~ +2，通常發言者評估，他人若無互動可給 0）
 
 【輸出 JSON 範例】：
 ```json

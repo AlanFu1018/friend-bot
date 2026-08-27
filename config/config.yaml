@@ -27,6 +27,17 @@ chat_behavior:
   # 多則訊息之間的擬真打字停頓時間（秒）[最小秒數, 最大秒數]
   typing_delay_range: [0.6, 1.3]
 
+  # 【多人群聊短時熱絡 (Burst) 聚合與動態引用回覆設定】
+  burst_reply:
+    # 是否啟用短時多人發言聚合與動態引用機制
+    enable_burst_reply: true
+    # 短時收集窗口（秒）：在此時間內若有新訊息且有多人發言，則等待收集完成
+    window_seconds: 4.5
+    # 觸發 Burst 的最小不同用戶數門檻（預設 2 人）
+    min_user_count: 2
+    # 單次 Burst 最多收集的訊息數量上限（達到上限立即觸發）
+    max_burst_messages: 5
+
 # 聯網即時搜尋與網頁閱讀 (Web Search Tool) 設定
 web_search:
   # 是否啟用 DuckDuckGo + Jina AI Reader 即時聯網檢索工具
