@@ -94,7 +94,7 @@ CALENDAR_AVATAR_URL: str = os.getenv("CALENDAR_AVATAR_URL", _cal_cfg.get("avatar
 
 # 6. Gemini 模型設定
 _gemini_cfg = _yaml_config.get("gemini", {})
-GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", _gemini_cfg.get("model", "gemini-2.5-flash"))
+GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", _gemini_cfg.get("model", "gemini-3.1-flash-lite"))
 GEMINI_TEMPERATURE: float = float(_gemini_cfg.get("temperature", 0.85))
 GEMINI_MAX_OUTPUT_TOKENS: int = int(_gemini_cfg.get("max_output_tokens", 2048))
 
