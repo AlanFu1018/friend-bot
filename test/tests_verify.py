@@ -7,7 +7,7 @@ if str(BASE_DIR) not in sys.path:
 import asyncio
 import unittest
 from datetime import datetime, timedelta
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 import discord
 
 from src.friend_bot.core.config import BOT_NAME
@@ -567,6 +567,61 @@ class TestFriendBotFeatures(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Labmem No.004", field_values)
         self.assertIn("Dr Pepper", field_values)
         self.assertIn("/kurisu-profile", field_values)
+
+    # ==================== 13. 訊息註解過濾 (# 與 ＃ 開頭) 測試 ====================
+    async def test_message_comment_filtering(self):
+        intents = discord.Intents.default()
+        client = FriendBotClient(intents=intents)
+        mock_user = MagicMock()
+        mock_user.id = 999999
+        mock_user.name = BOT_NAME
+        client._connection.user = mock_user
+
+        mock_channel = MagicMock()
+        mock_channel.id = 123456
+        mock_channel.send = AsyncMock()
+
+        # 測試 1: 半形 # 註解訊息
+        msg_comment_1 = MagicMock(spec=discord.Message)
+        msg_comment_1.id = 50001
+        msg_comment_1.channel = mock_channel
+        msg_comment_1.author = MagicMock()
+        msg_comment_1.author.id = 88888
+        msg_comment_1.author.bot = False
+        msg_comment_1.author.display_name = "測試用戶"
+        msg_comment_1.clean_content = "# 這是實驗室註解備忘，請不要回覆或記憶"
+        msg_comment_1.attachments = []
+
+        await client.on_message(msg_comment_1)
+
+        # 測試 2: 全形 ＃ 註解訊息
+        msg_comment_2 = MagicMock(spec=discord.Message)
+        msg_comment_2.id = 50002
+        msg_comment_2.channel = mock_channel
+        msg_comment_2.author = msg_comment_1.author
+        msg_comment_2.clean_content = "＃全形井號備忘"
+        msg_comment_2.attachments = []
+
+        await client.on_message(msg_comment_2)
+
+        # 測試 3: 帶圖片但附帶文字為 # 註解
+        msg_comment_3 = MagicMock(spec=discord.Message)
+        msg_comment_3.id = 50003
+        msg_comment_3.channel = mock_channel
+        msg_comment_3.author = msg_comment_1.author
+        msg_comment_3.clean_content = "# 圖片備忘"
+        mock_attachment = MagicMock()
+        msg_comment_3.attachments = [mock_attachment]
+
+        await client.on_message(msg_comment_3)
+
+        # 驗證 SQLite 資料庫中完全沒有寫入任何註解訊息
+        short_term = await MemoryManager.get_short_term_context("123456")
+        self.assertEqual(len(short_term), 0)
+
+        # 驗證監聽隊列亦無該註解訊息
+        unextracted = await MemoryManager.get_unextracted_messages("123456")
+        self.assertEqual(len(unextracted), 0)
 
 if __name__ == "__main__":
     unittest.main()

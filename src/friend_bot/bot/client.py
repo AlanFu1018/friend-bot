@@ -492,6 +492,11 @@ class FriendBotClient(discord.Client):
             value="**【自然群友聊天】**\n直接在頻道內聊天，短時間內**多人熱烈發言時會智慧選擇引用對象**，精準吐槽並兼顧在場群友！",
             inline=False
         )
+        embed.add_field(
+            name="📝 `訊息註解功能（以 # 開頭的訊息）`",
+            value="**【訊息不回覆與記憶過濾】**\n任何訊息若以 `#` 或 `＃` 開頭，機器人將視為註解備忘：**不回覆、不記憶、不提煉該則訊息**。",
+            inline=False
+        )
         if self.user and self.user.display_avatar:
             embed.set_thumbnail(url=self.user.display_avatar.url)
         embed.set_footer(text=f"{BOT_NAME} • Multi-User Memory & Webhook Calendar Enabled")
@@ -821,6 +826,11 @@ class FriendBotClient(discord.Client):
         has_image = bool(message.attachments)
 
         if not content and not has_image:
+            return
+
+        # 訊息註解過濾（若以 # 或 ＃ 開頭，則視為註解：在回覆頻道不回覆且不記憶，在監聽頻道亦排除不提煉）
+        if content.startswith("#") or content.startswith("＃"):
+            logger.debug(f"[註解過濾] 忽略以 '#' 開頭的訊息 - 頻道: {channel_id}, 發送者: {message.author.display_name}")
             return
 
         user_id = str(message.author.id)
