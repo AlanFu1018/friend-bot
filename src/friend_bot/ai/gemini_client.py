@@ -71,18 +71,26 @@ class GeminiClient:
         sys_inst = system_instruction or build_system_instruction()
         temp = temperature if temperature is not None else GEMINI_TEMPERATURE
         max_tok = max_tokens if max_tokens is not None else GEMINI_MAX_OUTPUT_TOKENS
-        freq_pen = frequency_penalty if frequency_penalty is not None else GEMINI_FREQUENCY_PENALTY
-        pres_pen = presence_penalty if presence_penalty is not None else GEMINI_PRESENCE_PENALTY
         tools = self._get_tools() if enable_tools else None
 
-        config = types.GenerateContentConfig(
-            system_instruction=sys_inst,
-            temperature=temp,
-            max_output_tokens=max_tok,
-            frequency_penalty=freq_pen,
-            presence_penalty=pres_pen,
-            tools=tools
-        )
+        # 構建基礎 GenerateContentConfig
+        # 注意：多數 Gemini 模型後端不支援 frequency_penalty / presence_penalty，傳入會引發 400 錯誤
+        config_kwargs = {
+            "system_instruction": sys_inst,
+            "temperature": temp,
+            "max_output_tokens": max_tok,
+            "tools": tools
+        }
+
+        # 僅當明確設定且不為 0.0 時才可選嘗試（若發生 penalty 異常時會自動降級 retry）
+        freq_pen = frequency_penalty if frequency_penalty is not None else GEMINI_FREQUENCY_PENALTY
+        pres_pen = presence_penalty if presence_penalty is not None else GEMINI_PRESENCE_PENALTY
+        if freq_pen and freq_pen != 0.0:
+            config_kwargs["frequency_penalty"] = freq_pen
+        if pres_pen and pres_pen != 0.0:
+            config_kwargs["presence_penalty"] = pres_pen
+
+        config = types.GenerateContentConfig(**config_kwargs)
 
         contents = []
 
@@ -99,16 +107,11 @@ class GeminiClient:
         # 加入文字 Prompt
         contents.append(prompt)
 
-        try:
-            logger.debug(f"向模型 [{self.model}] 發送生成請求 (溫度: {temp}, 頻率懲罰: {freq_pen}, 聯網工具: {bool(tools)})...")
-
-            # 若啟用了 tools，使用 aio.chats 進行多輪 Tool Calling 對話循環
+        async def _execute_generate(curr_config: types.GenerateContentConfig) -> str:
             if tools:
-                chat = self.client.aio.chats.create(model=self.model, config=config)
-                # 發送初始對話內容（若有圖片以 contents 發送，否則以 prompt 發送）
+                chat = self.client.aio.chats.create(model=self.model, config=curr_config)
                 response = await chat.send_message(contents if len(contents) > 1 else prompt)
 
-                # Tool Calling 循環處理（最多 3 輪以防無限循環）
                 loop_count = 0
                 while response.function_calls and loop_count < 3:
                     loop_count += 1
@@ -116,11 +119,7 @@ class GeminiClient:
                         if call.name == "search_web":
                             query = call.args.get("query", "")
                             logger.info(f"🔍 [Gemini Tool Call] 模型要求聯網搜尋: 「{query}」")
-                            
-                            # 執行 DuckDuckGo + Jina AI Reader
                             search_data = await perform_web_search(query, top_k=SEARCH_TOP_K)
-                            
-                            # 將搜尋結果作為 function_response 回傳給 Gemini
                             tool_res_part = types.Part.from_function_response(
                                 name=call.name,
                                 response={"result": search_data}
@@ -128,16 +127,33 @@ class GeminiClient:
                             response = await chat.send_message(tool_res_part)
 
                 return response.text.strip() if response and response.text else "（思考中斷了，請再說一次看看～）"
-
             else:
-                # 一般直接生成
                 response = await self.client.aio.models.generate_content(
                     model=self.model,
                     contents=contents,
-                    config=config
+                    config=curr_config
                 )
                 return response.text.strip() if response and response.text else "（思考中斷了，請再說一次看看～）"
 
+        try:
+            logger.debug(f"向模型 [{self.model}] 發送生成請求 (溫度: {temp}, 聯網工具: {bool(tools)})...")
+            return await _execute_generate(config)
         except Exception as e:
+            err_msg = str(e)
+            # 若為 Penalty 不支援之 400 錯誤，立即自動移除 penalty 重試，確保對話不中斷！
+            if "Penalty is not enabled for this model" in err_msg or "penalty" in err_msg.lower():
+                logger.warning(f"⚠️ 模型 [{self.model}] 不支援 Penalty 參數，自動移除 Penalty 並重試請求...")
+                safe_config = types.GenerateContentConfig(
+                    system_instruction=sys_inst,
+                    temperature=temp,
+                    max_output_tokens=max_tok,
+                    tools=tools
+                )
+                try:
+                    return await _execute_generate(safe_config)
+                except Exception as retry_err:
+                    logger.error(f"Gemini 重試回應失敗: {retry_err}", exc_info=True)
+                    return "（剛才走神了，能再跟我說一次嗎？）"
+
             logger.error(f"Gemini 生成回應失敗: {e}", exc_info=True)
             return "（剛才走神了，能再跟我說一次嗎？）"
