@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 import discord
 
+from src.friend_bot.core.config import BOT_NAME
 from src.friend_bot.memory.db import init_db, clear_all_memory
 from src.friend_bot.memory.memory_manager import MemoryManager
 from src.friend_bot.bot.utils.alarm import AlarmManager, parse_alarm_time
@@ -24,6 +25,7 @@ from src.friend_bot.ai.prompts import (
     TIER_ATTITUDE_MAP
 )
 from src.friend_bot.ai.memory_extractor import MemoryExtractor
+from src.friend_bot.bot.client import FriendBotClient
 
 class TestFriendBotFeatures(unittest.IsolatedAsyncioTestCase):
 
@@ -181,7 +183,7 @@ class TestFriendBotFeatures(unittest.IsolatedAsyncioTestCase):
       "user_name": "真由理",
       "facts": ["正在縫製新服裝"],
       "remove_facts": [],
-      "interaction_notes": "開心地分享近況",
+      "interaction_notes": "開心地面對分享近況",
       "favorability_delta": 1
     },
     {
@@ -349,7 +351,7 @@ class TestFriendBotFeatures(unittest.IsolatedAsyncioTestCase):
       "user_name": "桶子",
       "facts": ["入手了 Realforce 鍵盤"],
       "remove_facts": [],
-      "interaction_notes": "熱衷於分享電腦周邊",
+      "interaction_notes": "熱衷於分享電腦週邊",
       "favorability_delta": 0
     }
   ]
@@ -428,6 +430,7 @@ class TestFriendBotFeatures(unittest.IsolatedAsyncioTestCase):
   ]
 }
 ```"""
+        mock_gemini_client = MagicMock()
         mock_gemini_client.generate_response = AsyncMock(return_value=mock_gemini_response_2)
         await extractor.extract_and_update(
             user_id=user_id,
@@ -453,6 +456,7 @@ class TestFriendBotFeatures(unittest.IsolatedAsyncioTestCase):
   ]
 }
 ```"""
+        mock_gemini_client = MagicMock()
         mock_gemini_client.generate_response = AsyncMock(return_value=mock_gemini_response_3)
         await extractor.extract_and_update(
             user_id=user_id,
@@ -541,6 +545,28 @@ class TestFriendBotFeatures(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cid, "999888")
         self.assertEqual(len(msgs), 2)
         self.assertTrue(is_b)  # 2 位不同用戶，判定為 Burst!
+
+    # ==================== 12. 機器人自身自我介紹與 /kurisu-profile @機器人 測試 ====================
+    def test_bot_self_profile_embed(self):
+        intents = discord.Intents.default()
+        client = FriendBotClient(intents=intents)
+        
+        embed = client._create_bot_profile_embed()
+        self.assertIsNotNone(embed)
+        self.assertIn("牧瀨紅莉栖", embed.title)
+        self.assertIn(BOT_NAME, embed.title)
+        self.assertIn("維克多·孔多利亞大學", embed.description)
+        
+        field_names = [f.name for f in embed.fields]
+        self.assertTrue(any("身份與背景" in name for name in field_names))
+        self.assertTrue(any("專長領域與性格特質" in name for name in field_names))
+        self.assertTrue(any("關係與好感機制" in name for name in field_names))
+        self.assertTrue(any("常用指令指南" in name for name in field_names))
+        
+        field_values = "\n".join([f.value for f in embed.fields])
+        self.assertIn("Labmem No.004", field_values)
+        self.assertIn("Dr Pepper", field_values)
+        self.assertIn("/kurisu-profile", field_values)
 
 if __name__ == "__main__":
     unittest.main()

@@ -178,12 +178,29 @@ class FriendBotClient(discord.Client):
                 )
 
         # 3. /kurisu-profile 指令
-        @self.tree.command(name="kurisu-profile", description="查看自己或指定群友的長期記憶特徵畫像與好感度進展")
-        @app_commands.describe(user="選擇要查詢畫像的群友（留空代表查詢自己）")
+        @self.tree.command(name="kurisu-profile", description="查看自己、指定群友的記憶特徵畫像與好感度，或機器人自身簡介")
+        @app_commands.describe(user="選擇要查詢畫像的群友或克莉絲的簡介（留空代表查詢自己）")
         async def kurisu_profile_command(interaction: discord.Interaction, user: Optional[discord.User] = None):
             target_user = user or interaction.user
             target_user_id = str(target_user.id)
             target_user_name = target_user.display_name
+
+            # 檢查是否查詢機器人自身（包含 @機器人、自身 user_id 或 bot 自身）
+            is_bot_self = False
+            if self.user and target_user.id == self.user.id:
+                is_bot_self = True
+            elif target_user == self.user:
+                is_bot_self = True
+            elif getattr(target_user, "bot", False) and (
+                target_user.name == BOT_NAME or target_user.display_name == BOT_NAME or (self.user and target_user.name == self.user.name)
+            ):
+                is_bot_self = True
+
+            if is_bot_self:
+                embed = self._create_bot_profile_embed()
+                await interaction.response.send_message(embed=embed)
+                logger.info(f"已向 [{interaction.user.display_name}] 透過 /kurisu-profile 顯示 {BOT_NAME} 自身的個人檔案簡介")
+                return
 
             profile = await MemoryManager.get_user_profile(target_user_id)
             embed = self._create_profile_embed(target_user_id, target_user_name, profile, target_user)
@@ -211,7 +228,7 @@ class FriendBotClient(discord.Client):
                     color=0xE74C3C
                 )
                 embed_err.set_footer(text="格式範例：2026/8/27/15/30、8/27/15/30 或 15:30")
-                await interaction.response.send_message(embed=embed_err, ephemeral=True)
+                await interaction.response.send_message(embed=embed, ephemeral=True)
                 return
 
             channel_id = str(interaction.channel_id) if interaction.channel_id else ""
@@ -462,8 +479,12 @@ class FriendBotClient(discord.Client):
             inline=False
         )
         embed.add_field(
-            name="🧠 `/kurisu-profile [用戶]`",
-            value="**【查詢用戶個人畫像與好感度】**\n查看機器人為你或指定群友建立的長期特徵、好感進展與互動印象。\n*範例：`/kurisu-profile`*",
+            name="🧠 `/kurisu-profile [用戶或@機器人]`",
+            value=(
+                "**【查詢用戶個人畫像 / 機器人自身簡介】**\n"
+                "查看機器人為你或指定群友建立的長期特徵與好感進展；**若指定 @機器人 則會展示紅莉栖自身的人物檔案與自我介紹**！\n"
+                "*範例：`/kurisu-profile` 或 `/kurisu-profile user:@克莉絲`*"
+            ),
             inline=False
         )
         embed.add_field(
@@ -474,6 +495,65 @@ class FriendBotClient(discord.Client):
         if self.user and self.user.display_avatar:
             embed.set_thumbnail(url=self.user.display_avatar.url)
         embed.set_footer(text=f"{BOT_NAME} • Multi-User Memory & Webhook Calendar Enabled")
+        return embed
+
+    def _create_bot_profile_embed(self) -> discord.Embed:
+        """產生機器人自身的角色自我介紹與背景檔案 Embed 卡片"""
+        embed = discord.Embed(
+            title=f"🧠 角色檔案：牧瀨紅莉栖（Makise Kurisu）｜ {BOT_NAME}",
+            description=(
+                "「才、才不是特地向你做自我介紹呢！只是身為維克多·孔多利亞大學的研究員，"
+                "適度的身分公開是學術禮儀而已……可別會錯意了！」"
+            ),
+            color=0x9B59B6
+        )
+
+        embed.add_field(
+            name="🧬 身份與背景 (Identity)",
+            value=(
+                "• **本名**：牧瀨紅莉栖（Makise Kurisu）\n"
+                f"• **暱稱**：{BOT_NAME}、助手、克里斯蒂娜 (Christina)、The Zombie\n"
+                "• **學術所屬**：維克多·孔多利亞大學 腦科學研究所研究員\n"
+                "• **實驗室編號**：未來道具研究所 Labmem No.004"
+            ),
+            inline=False
+        )
+
+        embed.add_field(
+            name="🔬 專長領域與性格特質 (Expertise & Traits)",
+            value=(
+                "• **專長領域**：腦科學、神經脈衝傳導、時間跳躍理論\n"
+                "• **性格標籤**：天才少女、極度理性、傲嬌 (Tsundere)、重感情\n"
+                "• **日常喜好**：Dr Pepper、閱讀學術論文、黑咖啡、匿名論壇討論 (@channel)"
+            ),
+            inline=False
+        )
+
+        embed.add_field(
+            name="💖 關係與好感機制 (Relationship System)",
+            value=(
+                "• **好感階級**：支援動態 4 階好感進展 (`Stranger` ➔ `Familiar` ➔ `Labmem Partner` ➔ `Steins;Gate Bond`)\n"
+                "• **關係定位**：默默守護每位群友的傲嬌助手\n"
+                "• **每日好感**：平時在頻道聊天會自動累積好感度與記憶特徵"
+            ),
+            inline=False
+        )
+
+        embed.add_field(
+            name="💡 常用指令指南",
+            value=(
+                "• `/kurisu-help`：查看所有指令說明\n"
+                "• `/kurisu-profile`：查看你或群友的記憶特徵與好感進度\n"
+                "• `/kurisu-search`：強制聯網檢索即時資料\n"
+                "• `/kurisu-alarm-*` / `/kurisu-calendar-*`：設定定時提醒與行事曆"
+            ),
+            inline=False
+        )
+
+        if self.user and hasattr(self.user, "display_avatar") and self.user.display_avatar:
+            embed.set_thumbnail(url=self.user.display_avatar.url)
+
+        embed.set_footer(text=f"{BOT_NAME} • Labmem No.004 • Steins;Gate Worldline")
         return embed
 
     def _create_profile_embed(
@@ -552,7 +632,7 @@ class FriendBotClient(discord.Client):
 
         async def _do_process():
             try:
-                # 1. 取得這批訊息中所有出現過的用戶 ID 與提及對象
+                # 1. 取得這批訊息中所有出現過的使用者 ID 與提及對象
                 all_user_ids = list(set(str(m.author.id) for m in messages if not m.author.bot))
                 latest_msg = messages[-1]
                 latest_user_id = str(latest_msg.author.id)
