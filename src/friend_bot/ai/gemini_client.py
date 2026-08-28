@@ -15,11 +15,12 @@ from src.friend_bot.core.config import (
 from src.friend_bot.core.logger import get_logger
 from .prompts import build_system_instruction
 from src.friend_bot.ai.tools.web_search_tool import perform_web_search
+from src.friend_bot.bot.utils.emotion import EmotionReplacer
 
 logger = get_logger("gemini")
 
 class GeminiClient:
-    """封裝 Google GenAI SDK 的非同步客戶端，支援文字生成、多模態圖片分析與 Web Search Tool Calling"""
+    """封裝 Google GenAI SDK 的非同步客戶端，支援文字生成、多模態圖片分析、Web Search 與情緒標籤動態替換"""
 
     def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None):
         self.api_key = api_key or GEMINI_API_KEY
@@ -64,6 +65,7 @@ class GeminiClient:
         """
         發送對話請求至 Gemini 模型並取得回覆文字。
         支援 Tool Calling：若模型判斷需聯網，會暫停並要求搜尋，此處自動執行 DuckDuckGo + Jina AI Reader 後回傳結果給模型生成最終回應。
+        自動渲染 [emotion:xxx] 標籤為生動不重複的日系 2ch 顏文字。
         """
         if not self.api_key:
             return "（目前未設定 GEMINI_API_KEY，請在 .env 中填入金鑰～）"
@@ -74,7 +76,6 @@ class GeminiClient:
         tools = self._get_tools() if enable_tools else None
 
         # 構建基礎 GenerateContentConfig
-        # 注意：多數 Gemini 模型後端不支援 frequency_penalty / presence_penalty，傳入會引發 400 錯誤
         config_kwargs = {
             "system_instruction": sys_inst,
             "temperature": temp,
@@ -82,7 +83,6 @@ class GeminiClient:
             "tools": tools
         }
 
-        # 僅當明確設定且不為 0.0 時才可選嘗試（若發生 penalty 異常時會自動降級 retry）
         freq_pen = frequency_penalty if frequency_penalty is not None else GEMINI_FREQUENCY_PENALTY
         pres_pen = presence_penalty if presence_penalty is not None else GEMINI_PRESENCE_PENALTY
         if freq_pen and freq_pen != 0.0:
@@ -137,7 +137,8 @@ class GeminiClient:
 
         try:
             logger.debug(f"向模型 [{self.model}] 發送生成請求 (溫度: {temp}, 聯網工具: {bool(tools)})...")
-            return await _execute_generate(config)
+            raw_response = await _execute_generate(config)
+            return EmotionReplacer.replace_emotion_tags(raw_response)
         except Exception as e:
             err_msg = str(e)
             # 若為 Penalty 不支援之 400 錯誤，立即自動移除 penalty 重試，確保對話不中斷！
@@ -150,7 +151,8 @@ class GeminiClient:
                     tools=tools
                 )
                 try:
-                    return await _execute_generate(safe_config)
+                    raw_response = await _execute_generate(safe_config)
+                    return EmotionReplacer.replace_emotion_tags(raw_response)
                 except Exception as retry_err:
                     logger.error(f"Gemini 重試回應失敗: {retry_err}", exc_info=True)
                     return "（剛才走神了，能再跟我說一次嗎？）"

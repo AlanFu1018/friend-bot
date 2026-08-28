@@ -15,6 +15,7 @@ from src.friend_bot.memory import MemoryManager, init_db, get_db_connection
 from src.friend_bot.bot.utils.alarm import AlarmManager, parse_alarm_time
 from src.friend_bot.bot.utils.calendar import CalendarManager, parse_calendar_time
 from src.friend_bot.bot.utils.burst import BurstBufferManager
+from src.friend_bot.bot.utils.emotion import EmotionReplacer
 from src.friend_bot.ai.memory_extractor import MemoryExtractor
 from src.friend_bot.ai.prompts import (
     format_memory_context,
@@ -348,7 +349,7 @@ class TestFriendBotFeatures(unittest.IsolatedAsyncioTestCase):
             channel_id=channel_listen,
             user_id="user_batch_daru",
             user_name="桶子",
-            content="我也入手了新的 Realforce 鍵盤常駐在實驗室了。",
+            content="我也入了新的 Realforce 鍵盤常駐在實驗室了。",
             is_bot=False,
             extracted=False
         )
@@ -370,7 +371,7 @@ class TestFriendBotFeatures(unittest.IsolatedAsyncioTestCase):
     {
       "user_id": "user_batch_daru",
       "user_name": "桶子",
-      "facts": ["入手了 Realforce 鍵盤"],
+      "facts": ["入了 Realforce 鍵盤"],
       "remove_facts": [],
       "interaction_notes": "熱衷於分享電腦週邊",
       "favorability_delta": 0
@@ -391,7 +392,7 @@ class TestFriendBotFeatures(unittest.IsolatedAsyncioTestCase):
         self.assertIn("購買了新的科學實驗器材", get_fact_texts(prof_okabe["facts"]))
 
         prof_daru = await MemoryManager.get_user_profile("user_batch_daru")
-        self.assertIn("入手了 Realforce 鍵盤", get_fact_texts(prof_daru["facts"]))
+        self.assertIn("入了 Realforce 鍵盤", get_fact_texts(prof_daru["facts"]))
 
     # ==================== 8. 好感度進展與每日上限防刷保護測試 ====================
     async def test_favorability_progression_and_daily_cap(self):
@@ -414,7 +415,7 @@ class TestFriendBotFeatures(unittest.IsolatedAsyncioTestCase):
     {
       "user_id": "user_fav_tester",
       "user_name": "實驗助手",
-      "facts": ["請紅莉栖喝了一瓶Dr Pepper"],
+      "facts": ["請紅莉棲喝了一瓶Dr Pepper"],
       "remove_facts": [],
       "interaction_notes": "互動極佳",
       "favorability_delta": 3
@@ -471,7 +472,7 @@ class TestFriendBotFeatures(unittest.IsolatedAsyncioTestCase):
       "user_name": "實驗助手",
       "facts": [],
       "remove_facts": [],
-      "interaction_notes": "繼續稱讚紅莉栖",
+      "interaction_notes": "繼續稱讚紅莉棲",
       "favorability_delta": 2
     }
   ]
@@ -482,7 +483,7 @@ class TestFriendBotFeatures(unittest.IsolatedAsyncioTestCase):
         await extractor.extract_and_update(
             user_id=user_id,
             user_name=user_name,
-            recent_messages=["紅莉栖真是天才！"]
+            recent_messages=["紅莉棲真是天才！"]
         )
 
         p3 = await MemoryManager.get_user_profile(user_id)
@@ -657,6 +658,36 @@ class TestFriendBotFeatures(unittest.IsolatedAsyncioTestCase):
         p2 = await MemoryManager.get_user_profile(user_id)
         f2 = next(f for f in p2["facts"] if f["text"] == "喜歡吃壽喜燒")
         self.assertEqual(f2["hits"], 2)
+
+    # ==================== 16. 情緒標籤渲染器 (Emotion Tag & Replace) 測試 ====================
+    def test_emotion_replacer_tags_and_anti_repeat(self):
+        # 測試載入
+        EmotionReplacer.load_kaomoji()
+        self.assertTrue("tsundere" in EmotionReplacer._kaomoji_map)
+        self.assertTrue("shock" in EmotionReplacer._kaomoji_map)
+        self.assertTrue("sigh" in EmotionReplacer._kaomoji_map)
+
+        # 測試標籤替換
+        raw_text = "誰是助手啊！還有，我哪有開心？[emotion:tsundere]"
+        replaced = EmotionReplacer.replace_emotion_tags(raw_text)
+        self.assertNotIn("[emotion:tsundere]", replaced)
+        self.assertIn("誰是助手啊！還有，我哪有開心？", replaced)
+
+        # 測試別名映射 (如 [emotion:shy])
+        alias_text = "別看我啦……[emotion:shy]"
+        replaced_alias = EmotionReplacer.replace_emotion_tags(alias_text)
+        self.assertNotIn("[emotion:shy]", replaced_alias)
+
+        # 測試多標籤替換
+        multi_text = "真是中二。[emotion:sigh] 不過理論確實嚴謹。[emotion:proud]"
+        replaced_multi = EmotionReplacer.replace_emotion_tags(multi_text)
+        self.assertNotIn("[emotion:sigh]", replaced_multi)
+        self.assertNotIn("[emotion:proud]", replaced_multi)
+
+        # 測試防連續重複 (連續抽取 tsundere 兩次)
+        k1 = EmotionReplacer.get_random_kaomoji("tsundere")
+        k2 = EmotionReplacer.get_random_kaomoji("tsundere")
+        self.assertNotEqual(k1, k2)
 
 
 if __name__ == "__main__":
