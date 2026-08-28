@@ -26,6 +26,14 @@ from src.friend_bot.ai.prompts import (
 )
 from src.friend_bot.ai.memory_extractor import MemoryExtractor
 from src.friend_bot.bot.client import FriendBotClient
+from src.friend_bot.bot.commands import (
+    HelpCommandsMixin,
+    SearchCommandsMixin,
+    ProfileCommandsMixin,
+    AlarmCommandsMixin,
+    CalendarCommandsMixin,
+    GeneralCommandsMixin
+)
 
 class TestFriendBotFeatures(unittest.IsolatedAsyncioTestCase):
 
@@ -622,6 +630,36 @@ class TestFriendBotFeatures(unittest.IsolatedAsyncioTestCase):
         # 驗證監聽隊列亦無該註解訊息
         unextracted = await MemoryManager.get_unextracted_messages("123456")
         self.assertEqual(len(unextracted), 0)
+
+    # ==================== 14. Mixin 繼承架構與指令註冊測試 ====================
+    async def test_client_commands_mixin_inheritance(self):
+        intents = discord.Intents.default()
+        client = FriendBotClient(intents=intents)
+        
+        # 驗證細粒度 Mixin 繼承關係
+        self.assertTrue(issubclass(FriendBotClient, HelpCommandsMixin))
+        self.assertTrue(issubclass(FriendBotClient, SearchCommandsMixin))
+        self.assertTrue(issubclass(FriendBotClient, ProfileCommandsMixin))
+        self.assertTrue(issubclass(FriendBotClient, AlarmCommandsMixin))
+        self.assertTrue(issubclass(FriendBotClient, CalendarCommandsMixin))
+        
+        # 執行 setup_hook 並驗證指令樹被正確註冊
+        await client.setup_hook()
+        registered_commands = [cmd.name for cmd in client.tree.get_commands()]
+        
+        expected_commands = [
+            "kurisu-help",
+            "kurisu-search",
+            "kurisu-profile",
+            "kurisu-alarm-set",
+            "kurisu-alarm-list",
+            "kurisu-alarm-cancel",
+            "kurisu-calendar-set",
+            "kurisu-calendar-list",
+            "kurisu-calendar-cancel"
+        ]
+        for cmd in expected_commands:
+            self.assertIn(cmd, registered_commands)
 
 if __name__ == "__main__":
     unittest.main()
