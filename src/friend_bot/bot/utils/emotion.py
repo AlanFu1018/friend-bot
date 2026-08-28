@@ -40,6 +40,12 @@ DEFAULT_KAOMOJI_MAP: Dict[str, List[str]] = {
     ],
     "awkward": [
         "(^ ^;)", "(・_・;)", "(;´∀｀)", "(；・∀・)", "(・ω・;)"
+    ],
+    "sad": [
+        "(T_T)", "(ノ_・。)", "(ノДT)", "(つд⊂)", "(｡ŏ﹏ŏ)", "(´；ω；｀)", "(｡•́︿•̀｡)", "( ；∀；)"
+    ],
+    "depressed": [
+        "(◞‸◟)", "(´-ω-｀)", "( _ _ )...", "orz", "OTZ", "(o_ _)o", "(；´д｀)=3", "( •́ ̯•̀ )"
     ]
 }
 
@@ -103,7 +109,18 @@ class EmotionReplacer:
                 "happy": "soft",
                 "smile": "soft",
                 "mad": "angry",
-                "rage": "angry"
+                "rage": "angry",
+                "cry": "sad",
+                "crying": "sad",
+                "grief": "sad",
+                "sorrow": "sad",
+                "heartbroken": "sad",
+                "gloom": "depressed",
+                "gloomy": "depressed",
+                "down": "depressed",
+                "frustrated": "depressed",
+                "disappointed": "depressed",
+                "hopeless": "depressed"
             }
             if cat in alias_map:
                 pool = cls._kaomoji_map.get(alias_map[cat])
