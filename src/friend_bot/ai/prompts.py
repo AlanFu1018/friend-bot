@@ -75,7 +75,7 @@ def format_memory_context(
             profile_lines.append("- 已知特徵/喜好: " + "、".join(facts))
         notes = user_profile.get("interaction_notes", "")
         if notes:
-            profile_lines.append(f"- 互動印象: {notes}")
+            profile_lines.append(f"- 互動印象與習慣:\n{notes}")
         context_parts.append("\n".join(profile_lines))
 
     # 2. 對話中提及 / 近期在場的其他群友畫像
@@ -142,7 +142,6 @@ def build_burst_dialogue_prompt(
         msg_lines.append(f"{idx}. [ID: {m_id}] {u_name}: {content}{has_img}")
 
     burst_block = "\n".join(msg_lines)
-    default_target_id = str(burst_messages[-1].get("message_id", "")) if burst_messages else ""
 
     return f"""{memory_context}
 
@@ -179,7 +178,7 @@ def build_multi_entity_extraction_prompt(
     recent_messages: List[str]
 ) -> str:
     """
-    建立用於【多實體特徵提煉、跨用戶歸屬、好感度評估與事實更正】的 Prompt。
+    建立用於【多實體特徵提煉、跨用戶歸屬、好感度評估、事實更正與結構化深度印象】的 Prompt。
     """
     speaker_name = speaker.get("user_name", "當前發言者")
     speaker_id = str(speaker.get("user_id", ""))
@@ -203,7 +202,7 @@ def build_multi_entity_extraction_prompt(
     messages_str = "\n".join(f"- {msg}" for msg in recent_messages)
 
     return f"""你是一個精通群聊社交、好感度評估與實體關係分析的記憶提煉助理。
-請分析發言者【{speaker_name}】在 Discord 中的最新發言記錄，並執行【多實體特徵歸屬提煉、好感度微調評估與事實自我更正】。
+請分析發言者【{speaker_name}】在 Discord 中的最新發言記錄，並執行【多實體特徵歸屬提煉、好感度微調評估、事實自我更正與多維度深度印象生成】。
 
 【當前發言者 (Speaker)】:
 - 名稱: {speaker_name} (ID: {speaker_id})
@@ -229,8 +228,11 @@ def build_multi_entity_extraction_prompt(
      * +1 ~ +2：送紅莉栖禮物（Dr Pepper、咖啡）、認真討論科學話題、由衷感謝、關心紅莉栖、氛圍融洽之日常互動。
      * 0：一般客套問答、一般日常打招呼、陳述客觀事實。
      * -1 ~ -2：惡意挑釁、無理取鬧、人身攻擊、傳播嚴重偽科學且態度頑劣。
-4. 【社交印象 (interaction_notes)】：
-   - 「主觀評價/他人調侃/社交行為/對話風格」放入 "interaction_notes"。
+4. 【深度結構化社交印象 (interaction_notes)】：
+   - 請將用戶的互動印象結構化為三個維度（約 80~150 字），格式必須包含以下三個標籤：
+     * 【核心性格】：沉澱長期穩定的人格基調（中二、理性、溫柔、幽默自嘲等），若歷史已有記錄請參考保留並適度微調深化。
+     * 【社交關係】：記錄對特定群友（如桶子、真由理等）的互動默契與態度，以及與紅莉栖的互動張力（傲嬌、調侃、尊重等）。
+     * 【近期動態】：根據最新對話滾動更新當前的生活狀態、話題焦點、抱怨、作息或情緒動向。
 5. 【輸出規範】：
    - 輸出嚴格的 JSON 物件，包含 "updates" 陣列。
 
@@ -243,7 +245,7 @@ def build_multi_entity_extraction_prompt(
       "user_name": "{speaker_name}",
       "facts": ["目前定居在台北市"],
       "remove_facts": ["住在台中"],
-      "interaction_notes": "發言風格風趣，主動更正了居住地資訊",
+      "interaction_notes": "【核心性格】極度理性中帶著傲嬌，對未知科學充滿狂熱，是團隊的核心推手。\\n【社交關係】對桶子愛吐槽但非常信任，面對紅莉栖時嘴硬卻常被科學論點破防。\\n【近期動態】最近因為連夜做實驗而顯得疲憊，多次向群友抱怨程式 bug，互動時情緒較平時更直接。",
       "favorability_delta": 1
     }},
     {{
@@ -251,7 +253,7 @@ def build_multi_entity_extraction_prompt(
       "user_name": "桶子",
       "facts": ["最近常熬夜通宵"],
       "remove_facts": [],
-      "interaction_notes": "經常被發言者吐槽生活作息混亂",
+      "interaction_notes": "【核心性格】幽默隨和、專精技術的超級駭客，對二次元文化充滿熱忱。\\n【社交關係】常被岡部與真由理吐槽生活作息，但關鍵時刻極度可靠。\\n【近期動態】近期沉迷新出的 Galgame 與鍵盤硬體，連日熬夜打電動。",
       "favorability_delta": 0
     }}
   ]
@@ -289,7 +291,7 @@ def build_batch_dialogue_extraction_prompt(
     dialogue_section = "\n".join(dialogue_lines)
 
     return f"""你是一個精通 Discord 群聊社交分析、好感度評估與知識提煉的助理。
-以下是一段在群組中累積的多輪對話記錄，請全局分析這段對話，並為各參與者或被提及的群友進行【多實體特徵提煉、好感度增減評估與畫像更新】。
+以下是一段在群組中累積的多輪對話記錄，請全局分析這段對話，並為各參與者或被提及的群友進行【多實體特徵提煉、好感度增減評估、事實更正與多維度深度印象更新】。
 
 【參與者與關係人的已知歷史畫像】:
 {profiles_section}
@@ -308,8 +310,11 @@ def build_batch_dialogue_extraction_prompt(
      * +1 ~ +2：氛圍融洽、熱心分享、真誠討論科學或互相關心。
      * 0：一般日常短句、閒聊。
      * -1 ~ -2：惡意挑釁、無理辱罵。
-4. 【社交印象 (interaction_notes)】：
-   - 記錄性格特點、常聊話題、與其他群友的互動關係。
+4. 【深度結構化社交印象 (interaction_notes)】：
+   - 結構化為三維度（約 80~150 字），包含標籤：
+     * 【核心性格】：沉澱長期穩定的人格特質基調，參考歷史記錄適度保留。
+     * 【社交關係】：記錄對其他群友的互動態度，以及與紅莉栖的互動默契。
+     * 【近期動態】：根據此批對話總結最近的生活焦點、情緒或話題動態。
 5. 【輸出規範】：
    - 輸出嚴格的 JSON 物件，包含 "updates" 陣列。
 
@@ -322,7 +327,7 @@ def build_batch_dialogue_extraction_prompt(
       "user_name": "岡部",
       "facts": ["最近在研究時間機器新理論"],
       "remove_facts": [],
-      "interaction_notes": "在群裡興奮地分享研究成果",
+      "interaction_notes": "【核心性格】中二狂氣科學家風格，熱衷於發表作戰計畫。\\n【社交關係】常與桶子交流實驗室進展，對紅莉栖愛反駁卻深受信賴。\\n【近期動態】在群裡興奮地分享新的時間理論研究成果。",
       "favorability_delta": 1
     }},
     {{
@@ -330,7 +335,7 @@ def build_batch_dialogue_extraction_prompt(
       "user_name": "桶子",
       "facts": ["買了新靜音機械鍵盤"],
       "remove_facts": [],
-      "interaction_notes": "熱情地向大家推薦電腦周邊",
+      "interaction_notes": "【核心性格】技術精湛且熱愛二次元文化的頂級駭客。\\n【社交關係】常與岡部互相吐槽，是實驗室的技術頂樑柱。\\n【近期動態】熱情地向大家推薦電腦週邊與靜音鍵盤。",
       "favorability_delta": 0
     }}
   ]
