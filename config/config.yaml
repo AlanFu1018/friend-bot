@@ -83,9 +83,9 @@ memory:
     speaker_recent_limit: 2   # 軌道 3：最新近況事實數量上限
     
     # 在場 / 被提及其他群友 (In-context / Others) 事實配額設定
-    others_max_total: 3       # 每位其他群友最多帶入的事實總數
-    others_heat_limit: 1      # 軌道 1：核心高頻事實數量上限
-    others_recent_limit: 1    # 軌道 3：最新近況事實數量上限
+    others_max_total: 5       # 每位其他群友最多帶入的事實總數
+    others_heat_limit: 2      # 軌道 1：核心高頻事實數量上限
+    others_recent_limit: 2    # 軌道 3：最新近況事實數量上限
     
     # 雙重熱度加權與防刷設定
     rag_hit_cooldown_seconds: 3600  # 即時對話 RAG 命中加權冷卻時間（秒，預設 1 小時）
