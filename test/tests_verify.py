@@ -701,6 +701,51 @@ class TestFriendBotFeatures(unittest.IsolatedAsyncioTestCase):
         k2 = EmotionReplacer.get_random_kaomoji("tsundere")
         self.assertNotEqual(k1, k2)
 
+    # ==================== 17. 忽略前綴繞過監聽與回覆測試 ====================
+    async def test_ignore_prefixes_bypass_listening_and_reply(self):
+        client = FriendBotClient(intents=discord.Intents.default())
+        
+        # 建立模擬 Message
+        mock_channel = MagicMock()
+        mock_channel.id = 1542526624979878019  # 回覆頻道
+
+        # 測試 1: 帶有 '#' 前綴的訊息
+        msg_hash = MagicMock(spec=discord.Message)
+        msg_hash.id = 99901
+        msg_hash.channel = mock_channel
+        msg_hash.author = MagicMock()
+        msg_hash.author.id = 12345
+        msg_hash.author.bot = False
+        msg_hash.author.display_name = "測試員"
+        msg_hash.clean_content = "# 這是一條測試用的旁白備註，不應被記錄或回覆"
+        msg_hash.attachments = []
+
+        with patch.object(MemoryManager, "save_message", new_callable=AsyncMock) as mock_save:
+            with patch.object(client.burst_manager, "add_message", new_callable=AsyncMock) as mock_burst:
+                await client.on_message(msg_hash)
+                mock_save.assert_not_called()
+                mock_burst.assert_not_called()
+
+        # 測試 2: 帶有 '//' 前綴的訊息在監聽頻道中
+        mock_listen_channel = MagicMock()
+        mock_listen_channel.id = 935055001062088724  # 監聽頻道
+
+        msg_slash = MagicMock(spec=discord.Message)
+        msg_slash.id = 99902
+        msg_slash.channel = mock_listen_channel
+        msg_slash.author = MagicMock()
+        msg_slash.author.id = 12345
+        msg_slash.author.bot = False
+        msg_slash.author.display_name = "測試員"
+        msg_slash.clean_content = "// 這是另一條內部備註"
+        msg_slash.attachments = []
+
+        with patch.object(MemoryManager, "save_message", new_callable=AsyncMock) as mock_save:
+            with patch.object(client.memory_extractor, "add_listen_message", new_callable=AsyncMock) as mock_listen:
+                await client.on_message(msg_slash)
+                mock_save.assert_not_called()
+                mock_listen.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

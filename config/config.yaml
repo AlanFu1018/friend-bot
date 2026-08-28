@@ -18,11 +18,14 @@ bot:
 
 # 訊息發送與自然氣泡行為設定
 chat_behavior:
+  # 略過/繞過前綴（以這些前綴開頭的訊息將完全被機器人忽略：不監聽、不記錄、不回覆）
+  ignore_prefixes: ["#", "＃", "//"]
+
   # 是否開啟擬真多氣泡自然分段發送
   enable_multi_bubble: true
   
   # 單則氣泡的目標字數（達到此字數時將尋找最近的句號、換行等標點切分為下一則訊息）
-  bubble_target_length: 35
+  bubble_target_length: 47
   
   # 多則訊息之間的擬真打字停頓時間（秒）[最小秒數, 最大秒數]
   typing_delay_range: [0.6, 1.3]
@@ -53,7 +56,7 @@ web_search:
 calendar:
   # 全域預設 Webhook URL（選填，若未填則自動在目標頻道調用或建立 Webhook / 頻道發送）
   webhook_url: ""
-  # Webhook 顯示的紅莉栖頭像圖片 URL（選填）
+  # Webhook 顯示的紅莉棲頭像圖片 URL（選填）
   avatar_url: ""
 
 # Gemini AI 模型設定

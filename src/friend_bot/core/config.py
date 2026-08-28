@@ -69,6 +69,9 @@ MAX_MESSAGE_LENGTH: int = _bot_cfg.get("max_message_length", 2000)
 
 # 3. 聊天氣泡發送行為設定
 _chat_behavior_cfg = _yaml_config.get("chat_behavior", {})
+_ignore_prefixes = _chat_behavior_cfg.get("ignore_prefixes", ["#", "＃", "//"])
+IGNORE_PREFIXES: List[str] = [str(p) for p in _ignore_prefixes] if isinstance(_ignore_prefixes, list) else ["#", "＃", "//"]
+
 ENABLE_MULTI_BUBBLE: bool = bool(_chat_behavior_cfg.get("enable_multi_bubble", True))
 BUBBLE_TARGET_LENGTH: int = int(_chat_behavior_cfg.get("bubble_target_length", 35))
 _typing_delay_cfg = _chat_behavior_cfg.get("typing_delay_range", [0.6, 1.3])

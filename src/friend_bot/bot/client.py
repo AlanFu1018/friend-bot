@@ -10,6 +10,7 @@ from src.friend_bot.core.config import (
     REPLY_CHANNEL_IDS,
     LISTEN_CHANNEL_IDS,
     SHOW_TYPING,
+    IGNORE_PREFIXES,
     ENABLE_BURST_REPLY,
     BURST_WINDOW_SECONDS,
     BURST_MIN_USER_COUNT,
@@ -100,11 +101,18 @@ class FriendBotClient(
         logger.info(f"機器人已成功登入為: {self.user} (ID: {self.user.id})")
         logger.info(f"回覆頻道 (Reply Channels): {REPLY_CHANNEL_IDS}")
         logger.info(f"監聽頻道 (Listen Channels): {LISTEN_CHANNEL_IDS}")
+        logger.info(f"忽略前綴 (Ignore Prefixes): {IGNORE_PREFIXES}")
         logger.info(f"Burst 聚合模式: {'已啟用' if ENABLE_BURST_REPLY else '未啟用'}")
 
     async def on_message(self, message: discord.Message):
         """訊息事件處理器：支援監聽頻道批次提煉與主頻道 Burst 聚合回覆緩衝區"""
         if message.author.bot or message.author == self.user:
+            return
+
+        clean_text = message.clean_content.strip()
+        # 檢查是否為略過/旁白前綴（如 #, ＃, // 等，完全繞過監聽、記錄與回覆）
+        if clean_text and any(clean_text.startswith(prefix) for prefix in IGNORE_PREFIXES):
+            logger.debug(f"[繞過略過] 訊息以忽略前綴開頭，不予監聽與回覆: {clean_text}")
             return
 
         channel_id = str(message.channel.id)
