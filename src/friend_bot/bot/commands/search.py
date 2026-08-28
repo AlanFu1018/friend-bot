@@ -10,7 +10,13 @@ from src.friend_bot.core.config import (
     BOT_NAME,
     ENABLE_HISTORY_RECALL,
     SHOW_TYPING,
-    TYPING_DELAY_RANGE
+    TYPING_DELAY_RANGE,
+    FACTS_SPEAKER_MAX_TOTAL,
+    FACTS_SPEAKER_HEAT_LIMIT,
+    FACTS_SPEAKER_RECENT_LIMIT,
+    FACTS_OTHERS_MAX_TOTAL,
+    FACTS_OTHERS_HEAT_LIMIT,
+    FACTS_OTHERS_RECENT_LIMIT
 )
 from src.friend_bot.memory import MemoryManager
 from src.friend_bot.bot.utils.calendar import CalendarManager
@@ -51,11 +57,46 @@ class SearchCommandsMixin:
                 max_others=3
             )
 
+            # 三軌混合事實檢索 (Heat + RAG + Recent)
+            if current_user_profile:
+                filtered_facts, hit_facts = MemoryManager.filter_facts_three_tracks(
+                    facts_data=current_user_profile.get("facts", []),
+                    query_text=query,
+                    max_total=FACTS_SPEAKER_MAX_TOTAL,
+                    heat_limit=FACTS_SPEAKER_HEAT_LIMIT,
+                    recent_limit=FACTS_SPEAKER_RECENT_LIMIT
+                )
+                current_user_profile["facts"] = filtered_facts
+                if hit_facts:
+                    asyncio.create_task(MemoryManager.record_fact_hits(user_id, hit_facts))
+
+            if other_user_profiles:
+                for o_prof in other_user_profiles:
+                    o_uid = str(o_prof.get("user_id", ""))
+                    o_filtered, o_hits = MemoryManager.filter_facts_three_tracks(
+                        facts_data=o_prof.get("facts", []),
+                        query_text=query,
+                        max_total=FACTS_OTHERS_MAX_TOTAL,
+                        heat_limit=FACTS_OTHERS_HEAT_LIMIT,
+                        recent_limit=FACTS_OTHERS_RECENT_LIMIT
+                    )
+                    o_prof["facts"] = o_filtered
+                    if o_hits and o_uid:
+                        asyncio.create_task(MemoryManager.record_fact_hits(o_uid, o_hits))
+
+            # 行事曆排程摘要
             calendar_summary = await CalendarManager.get_user_schedule_summary(user_id)
+
+            # 跨頻道深度回憶
+            recent_msg_ids = [str(m.get("message_id")) for m in short_term if m.get("message_id")]
             deep_history = []
             if ENABLE_HISTORY_RECALL:
-                deep_history = await MemoryManager.recall_deep_history(query_text=query)
+                deep_history = await MemoryManager.recall_deep_history(
+                    query_text=query,
+                    exclude_message_ids=recent_msg_ids
+                )
 
+            # 組裝上下文與 Prompt
             memory_context = format_memory_context(
                 current_user_name=user_name,
                 user_profile=current_user_profile,
@@ -67,62 +108,54 @@ class SearchCommandsMixin:
 
             prompt = f"""{memory_context}
 
-【當前用戶最新發言】:
-{user_name}: 【用戶明確要求強制聯網搜尋最新資料】：{query}
+【用戶聯網查詢請求】:
+{user_name}: {query}
 
-【特別指示】：
-請務必使用 search_web 搜尋即時資料，並在獲取搜尋結果後，以你的角色風格（傲嬌/理性的克莉絲）**詳細綜合整理並具體回覆搜尋到的最新資訊與實質內容**給 {user_name}："""
+請以傲嬌幽默的天才科學家風格，結合聯網檢索工具為 {user_name} 查證並給出清晰有趣的解答："""
 
-            response_text = await self.gemini.generate_response(prompt=prompt)
-            chunks = split_message(response_text)
+            try:
+                # 調用 Gemini 聯網搜尋（強制 enable_tools=True）
+                response_text = await self.gemini.generate_response(
+                    prompt=prompt,
+                    enable_tools=True
+                )
 
-            if chunks:
-                first_msg = await interaction.followup.send(chunks[0])
-                current_ts = int(time.time())
+                chunks = split_message(response_text)
                 
-                await MemoryManager.save_message(
-                    message_id=str(interaction.id),
-                    channel_id=channel_id,
-                    user_id=user_id,
-                    user_name=user_name,
-                    content=query,
-                    has_image=False,
-                    is_bot=False,
-                    timestamp=current_ts,
-                    extracted=True
-                )
+                # 第一則使用 Followup 回覆 Interaction
+                await interaction.followup.send(chunks[0])
 
-                sent_chunks = [chunks[0]]
-                if len(chunks) > 1 and interaction.channel:
-                    for idx, chunk in enumerate(chunks[1:], start=1):
-                        min_delay, max_delay = TYPING_DELAY_RANGE
-                        calc_delay = min(max_delay, max(min_delay, len(chunk) * 0.015))
-                        actual_delay = max(min_delay, calc_delay + random.uniform(-0.1, 0.2))
-                        if SHOW_TYPING:
-                            async with interaction.channel.typing():
-                                await asyncio.sleep(actual_delay)
-                        else:
+                # 後續氣泡依序透過頻道發送
+                for chunk in chunks[1:]:
+                    min_delay, max_delay = TYPING_DELAY_RANGE
+                    calc_delay = min(max_delay, max(min_delay, len(chunk) * 0.015))
+                    actual_delay = max(min_delay, calc_delay + random.uniform(-0.1, 0.2))
+
+                    if SHOW_TYPING and interaction.channel:
+                        async with interaction.channel.typing():
                             await asyncio.sleep(actual_delay)
-                        sent_msg = await interaction.channel.send(chunk)
-                        sent_chunks.append(chunk)
+                    else:
+                        await asyncio.sleep(actual_delay)
 
-                await MemoryManager.save_message(
-                    message_id=str(first_msg.id if hasattr(first_msg, 'id') else interaction.id),
-                    channel_id=channel_id,
-                    user_id=str(self.user.id),
-                    user_name=BOT_NAME,
-                    content="\n".join(sent_chunks),
-                    has_image=False,
-                    is_bot=True,
-                    timestamp=int(time.time()),
-                    extracted=True
-                )
+                    if interaction.channel:
+                        await interaction.channel.send(chunk)
 
-                asyncio.create_task(
-                    self.memory_extractor.extract_and_update(
+                # 儲存對話紀錄
+                if channel_id:
+                    await MemoryManager.save_message(
+                        message_id=str(interaction.id),
+                        channel_id=channel_id,
                         user_id=user_id,
                         user_name=user_name,
-                        recent_messages=[query],
-                        other_users=other_user_profiles
+                        content=f"/kurisu-search {query}",
+                        has_image=False,
+                        is_bot=False,
+                        timestamp=int(time.time()),
+                        extracted=False
                     )
-                )
+
+                logger.info(f"成功完成 /kurisu-search 回覆 (字數: {len(response_text)}, 氣泡數: {len(chunks)})")
+
+            except Exception as e:
+                logger.error(f"/kurisu-search 指令處理失敗: {e}", exc_info=True)
+                await interaction.followup.send("（糟糕……聯網模組在接收外界訊號時發生干擾，請稍後再試一次吧！）")

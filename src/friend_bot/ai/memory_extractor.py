@@ -17,7 +17,7 @@ from src.friend_bot.core.config import (
 logger = get_logger("extractor")
 
 class MemoryExtractor:
-    """非同步背景記憶提煉器：支援單則提煉、監聽頻道多輪批次提煉、JIT 按需統合、好感度評估與事實增量保護"""
+    """非同步背景記憶提煉器：支援單則提煉、監聽頻道多輪批次提煉、JIT 按需整合、好感度評估與三軌事實加權"""
 
     def __init__(self, gemini_client: Optional[GeminiClient] = None):
         self.ai = gemini_client or GeminiClient()
@@ -26,7 +26,7 @@ class MemoryExtractor:
         self._lock = asyncio.Lock()
 
     async def _safe_apply_updates(self, updates: List[Dict[str, Any]], default_user_name: str = "") -> None:
-        """核心安全合併管線：歷史事實永久保護 + remove_facts 精準更正 + 隱密好感度計算與印象演進"""
+        """核心安全合併管線：歷史事實永久保護 + remove_facts 精準更正 + 提煉重複加權 + 隱密好感度計算與印象演進"""
         if not isinstance(updates, list) or not updates:
             return
 
@@ -57,27 +57,12 @@ class MemoryExtractor:
             cur_daily_gain = current_p.get("daily_favorability_gain", 0) if current_p else 0
             cur_gain_date = current_p.get("last_gain_date", "") if current_p else ""
 
-            # 【安全更正與移除機制】：處理需要被精準剔除的舊事實
-            remove_clean = [
-                str(rf).strip().lower()
-                for rf in remove_facts_raw
-                if str(rf).strip()
-            ] if isinstance(remove_facts_raw, list) else []
-
-            if remove_clean:
-                filtered_cur_facts = [
-                    f for f in cur_facts
-                    if not any(rf in f.lower() or f.lower() in rf for rf in remove_clean)
-                ]
-            else:
-                filtered_cur_facts = list(cur_facts)
-
-            # 【增量聯集合併】：新事實 + 過濾後的歷史事實（確保歷史事實永不被覆蓋洗白）
-            incoming_clean_facts = (
-                [str(f).strip() for f in incoming_facts_raw if str(f).strip()]
-                if isinstance(incoming_facts_raw, list) else []
+            # 【安全更正與增量合併】：透過 MemoryManager.merge_facts 處理更正、剔除與 hits 加權
+            merged_facts = MemoryManager.merge_facts(
+                current_facts_raw=cur_facts,
+                incoming_facts_raw=incoming_facts_raw,
+                remove_facts_raw=remove_facts_raw
             )
-            merged_facts = list(dict.fromkeys(filtered_cur_facts + incoming_clean_facts))
 
             # 互動印象保護
             merged_notes = str(notes).strip() if (notes and str(notes).strip()) else cur_notes
@@ -147,7 +132,7 @@ class MemoryExtractor:
             speaker_info = {
                 "user_id": str(user_id),
                 "user_name": user_name,
-                "facts": speaker_profile.get("facts", []) if speaker_profile else [],
+                "facts": [f["text"] for f in speaker_profile.get("facts", [])] if speaker_profile else [],
                 "interaction_notes": speaker_profile.get("interaction_notes", "") if speaker_profile else "",
                 "favorability": speaker_profile.get("favorability", DEFAULT_FAVORABILITY) if speaker_profile else DEFAULT_FAVORABILITY
             }
@@ -156,7 +141,11 @@ class MemoryExtractor:
             if other_users:
                 for u in other_users:
                     if str(u.get("user_id")) != str(user_id):
-                        other_users_info.append(u)
+                        u_facts = u.get("facts", [])
+                        fact_strs = [f["text"] if isinstance(f, dict) else str(f) for f in u_facts]
+                        o_copy = dict(u)
+                        o_copy["facts"] = fact_strs
+                        other_users_info.append(o_copy)
 
             prompt = build_multi_entity_extraction_prompt(
                 speaker=speaker_info,
@@ -178,43 +167,69 @@ class MemoryExtractor:
                 if match:
                     cleaned_json_str = match.group(1).strip()
 
-            parsed = json.loads(cleaned_json_str)
-            updates = parsed.get("updates", [])
+            data = json.loads(cleaned_json_str)
+            updates = data.get("updates", [])
             await self._safe_apply_updates(updates, default_user_name=user_name)
 
         except Exception as e:
-            logger.debug(f"單次記憶提煉略過: {e}")
+            logger.warning(f"單次記憶提煉與好感度評估失敗 (User: {user_name}): {e}")
 
-    async def extract_from_dialogue_batch(
+    async def add_listen_message(
         self,
-        messages: List[Dict[str, Any]]
+        channel_id: str,
+        message_data: Dict[str, Any],
+        debounce_seconds: float = 4.0
     ) -> None:
-        """
-        【批次多輪對話提煉】：一次性消化多條累積訊息，全局提煉多個群友特徵與好感度並標記 extracted=1
-        """
-        if not ENABLE_AUTO_MEMORY_EXTRACTION or not messages:
+        """監聽頻道訊息防抖收集器"""
+        if not ENABLE_AUTO_MEMORY_EXTRACTION:
             return
 
+        async with self._lock:
+            if channel_id not in self._listen_queue:
+                self._listen_queue[channel_id] = []
+            self._listen_queue[channel_id].append(message_data)
+
+            if channel_id in self._debounce_tasks and not self._debounce_tasks[channel_id].done():
+                self._debounce_tasks[channel_id].cancel()
+
+            self._debounce_tasks[channel_id] = asyncio.create_task(
+                self._debounced_process_listen_channel(channel_id, debounce_seconds)
+            )
+
+    async def _debounced_process_listen_channel(self, channel_id: str, delay: float) -> None:
+        """防抖倒數完成後執行批次提煉"""
         try:
-            # 1. 蒐集這段對話中出現過的所有用戶 ID
-            user_ids = list(set(str(m.get("user_id")).strip() for m in messages if m.get("user_id")))
-            if not user_ids:
-                return
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            return
 
-            # 2. 批次查詢這些用戶的既有畫像
-            known_profiles_dict = await MemoryManager.get_user_profiles_batch(user_ids)
-            known_profiles = list(known_profiles_dict.values())
+        async with self._lock:
+            messages_to_process = self._listen_queue.pop(channel_id, [])
 
-            # 3. 建立多輪對話批次提煉 Prompt
+        if not messages_to_process:
+            return
+
+        await self._process_batch_extraction(channel_id, messages_to_process)
+
+    async def _process_batch_extraction(self, channel_id: str, messages: List[Dict[str, Any]]) -> None:
+        """執行監聽頻道多輪交談批次提煉"""
+        try:
+            user_ids = list(set(str(m.get("user_id")) for m in messages if m.get("user_id") and not m.get("is_bot")))
+            profiles_dict = await MemoryManager.get_user_profiles_batch(user_ids)
+            known_profiles = []
+            for p in profiles_dict.values():
+                p_copy = dict(p)
+                p_copy["facts"] = [f["text"] if isinstance(f, dict) else str(f) for f in p.get("facts", [])]
+                known_profiles.append(p_copy)
+
             prompt = build_batch_dialogue_extraction_prompt(
                 dialogue_messages=messages,
                 known_profiles=known_profiles
             )
 
-            # 4. 呼叫 Gemini 進行全局分析
             raw_result = await self.ai.generate_response(
                 prompt=prompt,
-                system_instruction="你是一個嚴謹的資料分析器，請以乾淨的 JSON 格式輸出批次對話記憶提煉與好感度評估結果，禁止任何無關廢話。",
+                system_instruction="你是一個專精 Discord 群聊分析的記憶提煉器，請以標準 JSON 輸出 updates 清單。",
                 temperature=0.2,
                 max_tokens=2048,
                 enable_tools=False
@@ -226,75 +241,49 @@ class MemoryExtractor:
                 if match:
                     cleaned_json_str = match.group(1).strip()
 
-            parsed = json.loads(cleaned_json_str)
-            updates = parsed.get("updates", [])
-
-            # 5. 走統一的安全合併管線
+            data = json.loads(cleaned_json_str)
+            updates = data.get("updates", [])
             await self._safe_apply_updates(updates)
 
-            # 6. 批次標記訊息為 extracted = 1
-            msg_ids = [str(m["message_id"]) for m in messages if m.get("message_id")]
-            if msg_ids:
+            msg_ids = [str(m.get("message_id")) for m in messages if m.get("message_id")]
+            await MemoryManager.mark_messages_extracted(msg_ids)
+            logger.info(f"✅ [監聽頻道批次提煉完成] 頻道 [{channel_id}] 共處理 {len(messages)} 則訊息")
+
+        except Exception as e:
+            logger.warning(f"監聽頻道批次提煉失敗 (Channel: {channel_id}): {e}")
+
+    async def extract_from_dialogue_batch(self, messages: List[Dict[str, Any]]) -> None:
+        """直接對一批對話訊息進行批次提煉（供測試或手動排程）"""
+        if not messages:
+            return
+        channel_id = str(messages[0].get("channel_id", "default_channel"))
+        await self._process_batch_extraction(channel_id, messages)
+
+    async def process_unextracted_for_user(self, user_id: str, user_name: str) -> None:
+        """主頻道 JIT 按需即時提煉"""
+        if not ENABLE_AUTO_MEMORY_EXTRACTION:
+            return
+
+        try:
+            unextracted = await MemoryManager.get_unextracted_messages_by_user(user_id=str(user_id), limit=15)
+            if not unextracted:
+                return
+
+            recent_texts = [str(m.get("content", "")) for m in unextracted if str(m.get("content", "")).strip()]
+            if not recent_texts:
+                msg_ids = [str(m.get("message_id")) for m in unextracted if m.get("message_id")]
                 await MemoryManager.mark_messages_extracted(msg_ids)
-                logger.info(f"📊 [批次記憶提煉完成] 已消化 {len(msg_ids)} 則累積訊息")
+                return
+
+            await self.extract_and_update(
+                user_id=user_id,
+                user_name=user_name,
+                recent_messages=recent_texts
+            )
+
+            msg_ids = [str(m.get("message_id")) for m in unextracted if m.get("message_id")]
+            await MemoryManager.mark_messages_extracted(msg_ids)
+            logger.debug(f"⚡ [JIT 提煉完成] 用戶 [{user_name}] 共補齊 {len(msg_ids)} 則訊息")
 
         except Exception as e:
-            logger.error(f"批次對話提煉失敗: {e}")
-
-    async def process_user_unextracted_messages(self, user_id: str) -> None:
-        """
-        【JIT 按需統合提煉】：當某用戶在主頻道發言時，優先消化其在監聽頻道累積的未提煉發言
-        """
-        if not ENABLE_AUTO_MEMORY_EXTRACTION:
-            return
-        try:
-            unextracted = await MemoryManager.get_unextracted_messages_by_user(user_id, limit=20)
-            if unextracted:
-                logger.info(f"⚡ [JIT 按需提煉] 觸發用戶 [{user_id}] 的 {len(unextracted)} 則待處理訊息提煉")
-                await self.extract_from_dialogue_batch(unextracted)
-        except Exception as e:
-            logger.debug(f"JIT 按需提煉略過: {e}")
-
-    async def process_unextracted_channel_messages(self, channel_id: Optional[str] = None, limit: int = 30) -> None:
-        """消化指定頻道或全域累積的未提煉訊息"""
-        if not ENABLE_AUTO_MEMORY_EXTRACTION:
-            return
-        try:
-            unextracted = await MemoryManager.get_unextracted_messages(channel_id=channel_id, limit=limit)
-            if unextracted:
-                await self.extract_from_dialogue_batch(unextracted)
-        except Exception as e:
-            logger.debug(f"頻道批次提煉略過: {e}")
-
-    # ==================== 監聽頻道隊列與防抖調度 ====================
-    def add_to_listen_queue(self, channel_id: str, message_dict: Dict[str, Any]) -> None:
-        """將監聽頻道訊息加入防抖緩衝隊列（累積滿 15 則或靜默 10 分鐘自動消化）"""
-        cid = str(channel_id)
-        if cid not in self._listen_queue:
-            self._listen_queue[cid] = []
-        self._listen_queue[cid].append(message_dict)
-
-        # 若已累積滿 15 則，立即排程非同步處理
-        if len(self._listen_queue[cid]) >= 15:
-            batch = list(self._listen_queue[cid])
-            self._listen_queue[cid] = []
-            asyncio.create_task(self.extract_from_dialogue_batch(batch))
-            return
-
-        # 否則重新設置 10 分鐘防抖計時器
-        if cid in self._debounce_tasks and not self._debounce_tasks[cid].done():
-            self._debounce_tasks[cid].cancel()
-
-        async def _delayed_flush():
-            try:
-                await asyncio.sleep(600)  # 10 分鐘靜默後自動批次提煉
-                async with self._lock:
-                    pending = self._listen_queue.pop(cid, [])
-                if pending:
-                    await self.extract_from_dialogue_batch(pending)
-            except asyncio.CancelledError:
-                pass
-            except Exception as e:
-                logger.debug(f"防抖消化略過: {e}")
-
-        self._debounce_tasks[cid] = asyncio.create_task(_delayed_flush())
+            logger.warning(f"JIT 即時提煉失敗 (User: {user_name}): {e}")

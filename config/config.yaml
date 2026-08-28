@@ -58,7 +58,7 @@ calendar:
 
 # Gemini AI 模型設定
 gemini:
-  # 預設使用的 Gemini 模型
+  # 預設使用的 Gemini 模型。(agent勿改動此設定)
   model: "gemini-3.1-flash-lite"
   
   # 溫度值 (0.0 ~ 2.0)：數值越高越隨機幽默，數值越低越精準嚴謹
@@ -75,6 +75,23 @@ memory:
   # 第 2 層 (長期畫像)：是否開啟背景自動分析對話並提取/更新用戶特徵（含純監聽頻道）
   enable_auto_memory_extraction: true
   
+  # 【三軌事實記憶檢索 (3-Track Fact RAG & Heat) 設定】
+  facts_rag:
+    # 主要發言者 (Speaker) 事實配額設定
+    speaker_max_total: 8      # 主要發言者最多帶入的事實總數
+    speaker_heat_limit: 2     # 軌道 1：核心高頻事實數量上限
+    speaker_recent_limit: 2   # 軌道 3：最新近況事實數量上限
+    
+    # 在場 / 被提及其他群友 (In-context / Others) 事實配額設定
+    others_max_total: 3       # 每位其他群友最多帶入的事實總數
+    others_heat_limit: 1      # 軌道 1：核心高頻事實數量上限
+    others_recent_limit: 1    # 軌道 3：最新近況事實數量上限
+    
+    # 雙重熱度加權與防刷設定
+    rag_hit_cooldown_seconds: 3600  # 即時對話 RAG 命中加權冷卻時間（秒，預設 1 小時）
+    extraction_reaffirm_bonus: 3    # 背景提煉重複確認事實之熱度加權增量 (hits += N)
+    rag_hit_bonus: 1                # 即時對話話題命中事實之熱度加權增量 (hits += N)
+
   # 第 3 層 (深層歷史回憶)：是否在檢測到話題或回憶觸發時自動檢索過去相關歷史對話（跨頻道回憶）
   enable_history_recall: true
   
@@ -97,12 +114,3 @@ favorability:
 
   # 單一用戶「每日好感度扣分上限」（避免因少數誤判過度扣分）
   daily_loss_limit: 10
-
-# 機器人個性與 Persona 設定
-persona:
-  # 機器人暱稱
-  bot_name: "克莉絲"
-  
-  # 角色性格設定檔路徑（Markdown .md 檔案）
-  # 機器人將直接讀取此 .md 檔案作為 System Prompt，方便自由撰寫長篇人設
-  persona_file: "persona.md"

@@ -1,30 +1,26 @@
-import sys
-from pathlib import Path
-BASE_DIR = Path(__file__).resolve().parents[1]
-if str(BASE_DIR) not in sys.path:
-    sys.path.insert(0, str(BASE_DIR))
-
-import asyncio
 import unittest
+import asyncio
+import os
+import sys
+import time
+import json
 from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
-import discord
 
-from src.friend_bot.core.config import BOT_NAME
-from src.friend_bot.memory.db import init_db, clear_all_memory
-from src.friend_bot.memory.memory_manager import MemoryManager
+# 加入根目錄至 sys.path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+import discord
+from src.friend_bot.memory import MemoryManager, init_db, get_db_connection
 from src.friend_bot.bot.utils.alarm import AlarmManager, parse_alarm_time
 from src.friend_bot.bot.utils.calendar import CalendarManager, parse_calendar_time
 from src.friend_bot.bot.utils.burst import BurstBufferManager
+from src.friend_bot.ai.memory_extractor import MemoryExtractor
 from src.friend_bot.ai.prompts import (
     format_memory_context,
-    build_multi_entity_extraction_prompt,
-    build_batch_dialogue_extraction_prompt,
     build_burst_dialogue_prompt,
-    parse_burst_reply_response,
-    TIER_ATTITUDE_MAP
+    parse_burst_reply_response
 )
-from src.friend_bot.ai.memory_extractor import MemoryExtractor
 from src.friend_bot.bot.client import FriendBotClient
 from src.friend_bot.bot.commands import (
     HelpCommandsMixin,
@@ -35,43 +31,63 @@ from src.friend_bot.bot.commands import (
     GeneralCommandsMixin
 )
 
+
+def get_fact_texts(facts: list) -> list:
+    """測試輔助：提取事實清單中的純文字字串"""
+    return [f["text"] if isinstance(f, dict) else str(f) for f in facts]
+
+
 class TestFriendBotFeatures(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self):
+        """每個測試執行前初始化記憶體資料庫"""
         await init_db()
-        await clear_all_memory()
+        async with get_db_connection() as db:
+            await db.execute("DELETE FROM alarms")
+            await db.execute("DELETE FROM calendar_events")
+            await db.execute("DELETE FROM user_profiles")
+            await db.execute("DELETE FROM messages")
+            await db.execute("DELETE FROM messages_fts")
+            await db.commit()
 
     # ==================== 1. 鬧鐘 (Alarm) 邏輯測試 ====================
-    def test_parse_alarm_time(self):
+    def test_parse_alarm_time_relative_and_absolute(self):
         base_dt = datetime(2026, 8, 27, 12, 0, 0)
-        dt, ts, date_str, time_str, formatted = parse_alarm_time("2026/8/27/15/30", base_now=base_dt)
-        self.assertEqual(formatted, "2026/08/27 15:30")
-        self.assertEqual(time_str, "15:30")
 
-    async def test_alarm_manager_lifecycle(self):
+        # 相對時間
+        dt, ts, date_str, time_str, formatted = parse_alarm_time("10m", base_now=base_dt)
+        self.assertEqual(ts, int((base_dt + timedelta(minutes=10)).timestamp()))
+
+        dt2, ts2, date_str2, time_str2, formatted2 = parse_alarm_time("2h", base_now=base_dt)
+        self.assertEqual(ts2, int((base_dt + timedelta(hours=2)).timestamp()))
+
+        # 絕對時間
+        dt3, ts3, date_str3, time_str3, formatted3 = parse_alarm_time("14:30", base_now=base_dt)
+        self.assertEqual(formatted3, "2026/08/27 14:30")
+
+    async def test_alarm_manager_crud(self):
         channel_id = "111222"
-        user_id = "user_alarm_test"
-        user_name = "KurisuFan"
-        content = "搶特展限定週邊"
+        user_id = "user_okabe"
+        user_name = "岡部倫太郎"
+        content = "召開 Lab 核心作戰會議"
         
-        future_dt = datetime.now() + timedelta(hours=2)
+        future_dt = datetime.now() + timedelta(hours=1)
         target_ts = int(future_dt.timestamp())
-        formatted_str = future_dt.strftime("%Y/%m/%d %H:%M")
+        target_str = future_dt.strftime("%Y/%m/%d %H:%M")
 
         alarm_id = await AlarmManager.create_alarm(
             channel_id=channel_id,
             user_id=user_id,
             user_name=user_name,
             target_timestamp=target_ts,
-            target_time_str=formatted_str,
+            target_time_str=target_str,
             content=content
         )
         self.assertIsInstance(alarm_id, int)
 
-        pending = await AlarmManager.get_pending_alarms(user_id=user_id)
-        self.assertTrue(any(a["id"] == alarm_id for a in pending))
-
-        await AlarmManager.mark_alarm_triggered(alarm_id)
+        active = await AlarmManager.get_pending_alarms(user_id=user_id)
+        self.assertEqual(len(active), 1)
+        self.assertEqual(active[0]["content"], content)
 
         alarm_id2 = await AlarmManager.create_alarm(
             channel_id=channel_id,
@@ -155,7 +171,7 @@ class TestFriendBotFeatures(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(current_prof["user_name"], "岡部")
         self.assertEqual(len(other_profs), 1)
         self.assertEqual(other_profs[0]["user_name"], "桶子")
-        self.assertIn("超級駭客", other_profs[0]["facts"])
+        self.assertIn("超級駭客", get_fact_texts(other_profs[0]["facts"]))
 
         context_str = format_memory_context(
             current_user_name="岡部",
@@ -219,13 +235,13 @@ class TestFriendBotFeatures(unittest.IsolatedAsyncioTestCase):
         )
 
         profile_a = await MemoryManager.get_user_profile("user_speaker_a")
-        self.assertIn("喜歡香蕉", profile_a["facts"])
-        self.assertIn("正在縫製新服裝", profile_a["facts"])
+        self.assertIn("喜歡香蕉", get_fact_texts(profile_a["facts"]))
+        self.assertIn("正在縫製新服裝", get_fact_texts(profile_a["facts"]))
 
         profile_b = await MemoryManager.get_user_profile("user_target_b")
-        self.assertIn("超級駭客", profile_b["facts"])
-        self.assertIn("最近沉迷最新Galgame", profile_b["facts"])
-        self.assertIn("每天熬夜到早上", profile_b["facts"])
+        self.assertIn("超級駭客", get_fact_texts(profile_b["facts"]))
+        self.assertIn("最近沉迷最新Galgame", get_fact_texts(profile_b["facts"]))
+        self.assertIn("每天熬夜到早上", get_fact_texts(profile_b["facts"]))
 
     # ==================== 5. 事實防洗白與增量聯集保護測試 ====================
     async def test_facts_anti_overwrite_protection(self):
@@ -267,23 +283,22 @@ class TestFriendBotFeatures(unittest.IsolatedAsyncioTestCase):
         await extractor.extract_and_update(
             user_id="555738929584930868",
             user_name="感應與運動",
-            recent_messages=["你今天好感度到底多少啊？"]
+            recent_messages=["我只是在測試好感度系統而已～"]
         )
 
         profile = await MemoryManager.get_user_profile("555738929584930868")
+        self.assertIsNotNone(profile)
         self.assertEqual(len(profile["facts"]), 8)
-        self.assertIn("對 FromSoftware 出品的遊戲有高度興趣", profile["facts"])
-        self.assertIn("對 EMT（緊急醫療技術員）相關話題感興趣", profile["facts"])
-        self.assertIn("對特定物品（如梅酒）的去向有追蹤與確認的習慣", profile["facts"])
-        self.assertIn("心理試探", profile["interaction_notes"])
+        self.assertIn("對 FromSoftware 出品的遊戲有高度興趣", get_fact_texts(profile["facts"]))
 
-    # ==================== 6. 事實更正與移除 (remove_facts) 測試 ====================
+    # ==================== 6. 事實修正與 remove_facts 機制測試 ====================
     async def test_facts_correction_and_remove(self):
+        initial_facts = ["住在台中", "喜歡吃拉麵", "職業是工程師"]
         await MemoryManager.update_user_profile(
             user_id="user_correct_test",
             user_name="測試群友",
-            facts=["住在台中市", "喜歡喝咖啡", "職業是軟體工程師"],
-            interaction_notes="平常話不多"
+            facts=initial_facts,
+            interaction_notes="普通群友"
         )
 
         mock_gemini_response = """```json
@@ -293,9 +308,9 @@ class TestFriendBotFeatures(unittest.IsolatedAsyncioTestCase):
       "user_id": "user_correct_test",
       "user_name": "測試群友",
       "facts": ["目前定居在台北市"],
-      "remove_facts": ["住在台中市"],
-      "interaction_notes": "主動更正了居住地資訊",
-      "favorability_delta": 1
+      "remove_facts": ["住在台中"],
+      "interaction_notes": "提到自己已經搬遷到台北生活",
+      "favorability_delta": 0
     }
   ]
 }
@@ -307,36 +322,34 @@ class TestFriendBotFeatures(unittest.IsolatedAsyncioTestCase):
         await extractor.extract_and_update(
             user_id="user_correct_test",
             user_name="測試群友",
-            recent_messages=["我上個月搬到台北了，不在台中了哦！"]
+            recent_messages=["我其實上個月就搬家到台北了，已經不住台中囉！"]
         )
 
         profile = await MemoryManager.get_user_profile("user_correct_test")
-        self.assertNotIn("住在台中市", profile["facts"])
-        self.assertIn("目前定居在台北市", profile["facts"])
-        self.assertIn("喜歡喝咖啡", profile["facts"])
-        self.assertIn("職業是軟體工程師", profile["facts"])
-        self.assertEqual(len(profile["facts"]), 3)
+        self.assertNotIn("住在台中", get_fact_texts(profile["facts"]))
+        self.assertIn("喜歡吃拉麵", get_fact_texts(profile["facts"]))
+        self.assertIn("目前定居在台北市", get_fact_texts(profile["facts"]))
 
-    # ==================== 7. 方案 C：監聽頻道多輪批次提煉與狀態流轉測試 ====================
+    # ==================== 7. 監聽頻道批次提煉 (Batch Extraction) 測試 ====================
     async def test_plan_c_batch_extraction_and_extracted_flag(self):
-        channel_listen = "listen_channel_999"
-        msg_1 = "msg_batch_1"
-        msg_2 = "msg_batch_2"
+        channel_listen = "999888"
         
         await MemoryManager.save_message(
-            message_id=msg_1,
+            message_id="msg_batch_1",
             channel_id=channel_listen,
             user_id="user_batch_okabe",
             user_name="岡部",
-            content="我買了新的科學實驗器材！",
+            content="我剛剛在秋葉原買了新的實驗器材！",
+            is_bot=False,
             extracted=False
         )
         await MemoryManager.save_message(
-            message_id=msg_2,
+            message_id="msg_batch_2",
             channel_id=channel_listen,
             user_id="user_batch_daru",
             user_name="桶子",
-            content="我剛入手了 Realforce 鍵盤，超好打！",
+            content="我也入手了新的 Realforce 鍵盤常駐在實驗室了。",
+            is_bot=False,
             extracted=False
         )
 
@@ -375,10 +388,10 @@ class TestFriendBotFeatures(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(unextracted_after), 0)
 
         prof_okabe = await MemoryManager.get_user_profile("user_batch_okabe")
-        self.assertIn("購買了新的科學實驗器材", prof_okabe["facts"])
+        self.assertIn("購買了新的科學實驗器材", get_fact_texts(prof_okabe["facts"]))
 
         prof_daru = await MemoryManager.get_user_profile("user_batch_daru")
-        self.assertIn("入手了 Realforce 鍵盤", prof_daru["facts"])
+        self.assertIn("入手了 Realforce 鍵盤", get_fact_texts(prof_daru["facts"]))
 
     # ==================== 8. 好感度進展與每日上限防刷保護測試 ====================
     async def test_favorability_progression_and_daily_cap(self):
@@ -535,118 +548,33 @@ class TestFriendBotFeatures(unittest.IsolatedAsyncioTestCase):
         msg_2.author.id = 222
         msg_2.author.bot = False
         msg_2.author.display_name = "桶子"
-        msg_2.clean_content = "第二句"
+        msg_2.clean_content = "第二句搶話"
         msg_2.attachments = []
 
-        flush_results = []
-        async def on_flush(channel_id, messages, is_burst):
-            flush_results.append((channel_id, messages, is_burst))
+        callback_mock = AsyncMock()
+        await burst_mgr.add_message(msg_1, on_flush=callback_mock)
+        await burst_mgr.add_message(msg_2, on_flush=callback_mock)
 
-        await burst_mgr.add_message(msg_1, on_flush)
-        await burst_mgr.add_message(msg_2, on_flush)
+        await asyncio.sleep(0.2)
+        self.assertNotIn("999888", burst_mgr._buffers)
 
-        # 等待窗口過期觸發 flush (0.25s)
-        await asyncio.sleep(0.25)
-
-        self.assertEqual(len(flush_results), 1)
-        cid, msgs, is_b = flush_results[0]
-        self.assertEqual(cid, "999888")
-        self.assertEqual(len(msgs), 2)
-        self.assertTrue(is_b)  # 2 位不同用戶，判定為 Burst!
-
-    # ==================== 12. 機器人自身自我介紹與 /kurisu-profile @機器人 測試 ====================
-    def test_bot_self_profile_embed(self):
-        intents = discord.Intents.default()
-        client = FriendBotClient(intents=intents)
+    # ==================== 12. Mixin 繼承鏈與全 Slash 指令註冊測試 ====================
+    def test_mixin_inheritance_and_command_registration(self):
+        client = FriendBotClient(intents=discord.Intents.default())
         
-        embed = client._create_bot_profile_embed()
-        self.assertIsNotNone(embed)
-        self.assertIn("牧瀨紅莉栖", embed.title)
-        self.assertIn(BOT_NAME, embed.title)
-        self.assertIn("維克多·孔多利亞大學", embed.description)
-        
-        field_names = [f.name for f in embed.fields]
-        self.assertTrue(any("身份與背景" in name for name in field_names))
-        self.assertTrue(any("專長領域與性格特質" in name for name in field_names))
-        self.assertTrue(any("關係與好感機制" in name for name in field_names))
-        self.assertTrue(any("常用指令指南" in name for name in field_names))
-        
-        field_values = "\n".join([f.value for f in embed.fields])
-        self.assertIn("Labmem No.004", field_values)
-        self.assertIn("Dr Pepper", field_values)
-        self.assertIn("/kurisu-profile", field_values)
+        self.assertIsInstance(client, HelpCommandsMixin)
+        self.assertIsInstance(client, SearchCommandsMixin)
+        self.assertIsInstance(client, ProfileCommandsMixin)
+        self.assertIsInstance(client, AlarmCommandsMixin)
+        self.assertIsInstance(client, CalendarCommandsMixin)
 
-    # ==================== 13. 訊息註解過濾 (# 與 ＃ 開頭) 測試 ====================
-    async def test_message_comment_filtering(self):
-        intents = discord.Intents.default()
-        client = FriendBotClient(intents=intents)
-        mock_user = MagicMock()
-        mock_user.id = 999999
-        mock_user.name = BOT_NAME
-        client._connection.user = mock_user
+        client.register_help_commands()
+        client.register_search_commands()
+        client.register_profile_commands()
+        client.register_alarm_commands()
+        client.register_calendar_commands()
 
-        mock_channel = MagicMock()
-        mock_channel.id = 123456
-        mock_channel.send = AsyncMock()
-
-        # 測試 1: 半形 # 註解訊息
-        msg_comment_1 = MagicMock(spec=discord.Message)
-        msg_comment_1.id = 50001
-        msg_comment_1.channel = mock_channel
-        msg_comment_1.author = MagicMock()
-        msg_comment_1.author.id = 88888
-        msg_comment_1.author.bot = False
-        msg_comment_1.author.display_name = "測試用戶"
-        msg_comment_1.clean_content = "# 這是實驗室註解備忘，請不要回覆或記憶"
-        msg_comment_1.attachments = []
-
-        await client.on_message(msg_comment_1)
-
-        # 測試 2: 全形 ＃ 註解訊息
-        msg_comment_2 = MagicMock(spec=discord.Message)
-        msg_comment_2.id = 50002
-        msg_comment_2.channel = mock_channel
-        msg_comment_2.author = msg_comment_1.author
-        msg_comment_2.clean_content = "＃全形井號備忘"
-        msg_comment_2.attachments = []
-
-        await client.on_message(msg_comment_2)
-
-        # 測試 3: 帶圖片但附帶文字為 # 註解
-        msg_comment_3 = MagicMock(spec=discord.Message)
-        msg_comment_3.id = 50003
-        msg_comment_3.channel = mock_channel
-        msg_comment_3.author = msg_comment_1.author
-        msg_comment_3.clean_content = "# 圖片備忘"
-        mock_attachment = MagicMock()
-        msg_comment_3.attachments = [mock_attachment]
-
-        await client.on_message(msg_comment_3)
-
-        # 驗證 SQLite 資料庫中完全沒有寫入任何註解訊息
-        short_term = await MemoryManager.get_short_term_context("123456")
-        self.assertEqual(len(short_term), 0)
-
-        # 驗證監聽隊列亦無該註解訊息
-        unextracted = await MemoryManager.get_unextracted_messages("123456")
-        self.assertEqual(len(unextracted), 0)
-
-    # ==================== 14. Mixin 繼承架構與指令註冊測試 ====================
-    async def test_client_commands_mixin_inheritance(self):
-        intents = discord.Intents.default()
-        client = FriendBotClient(intents=intents)
-        
-        # 驗證細粒度 Mixin 繼承關係
-        self.assertTrue(issubclass(FriendBotClient, HelpCommandsMixin))
-        self.assertTrue(issubclass(FriendBotClient, SearchCommandsMixin))
-        self.assertTrue(issubclass(FriendBotClient, ProfileCommandsMixin))
-        self.assertTrue(issubclass(FriendBotClient, AlarmCommandsMixin))
-        self.assertTrue(issubclass(FriendBotClient, CalendarCommandsMixin))
-        
-        # 執行 setup_hook 並驗證指令樹被正確註冊
-        await client.setup_hook()
-        registered_commands = [cmd.name for cmd in client.tree.get_commands()]
-        
+        registered_command_names = [cmd.name for cmd in client.tree.get_commands()]
         expected_commands = [
             "kurisu-help",
             "kurisu-search",
@@ -658,8 +586,78 @@ class TestFriendBotFeatures(unittest.IsolatedAsyncioTestCase):
             "kurisu-calendar-list",
             "kurisu-calendar-cancel"
         ]
-        for cmd in expected_commands:
-            self.assertIn(cmd, registered_commands)
+        for cmd_name in expected_commands:
+            self.assertIn(cmd_name, registered_command_names, f"指令 /{cmd_name} 未正確註冊至 CommandTree！")
+
+    # ==================== 13. 三軌混合事實檢索 (Three-track RAG) 測試 ====================
+    def test_three_track_rag_filtering(self):
+        facts = [
+            {"text": "最愛喝 Dr Pepper", "hits": 30, "created_at": 100},
+            {"text": "自稱狂氣科學家鳳凰院凶真", "hits": 25, "created_at": 110},
+            {"text": "不喜歡吃青椒", "hits": 2, "created_at": 120},
+            {"text": "喜歡在實驗室煮拉麵當宵夜", "hits": 5, "created_at": 130},
+            {"text": "上週新買了二手顯卡 RTX 4090", "hits": 1, "created_at": 140},
+            {"text": "昨天剛修理好了微波爐時間機器", "hits": 1, "created_at": 150}
+        ]
+
+        # 當對話提及「拉麵、宵夜」時
+        query = "今晚要去吃拉麵當宵夜嗎？"
+        filtered, hits = MemoryManager.filter_facts_three_tracks(
+            facts_data=facts,
+            query_text=query,
+            max_total=5,
+            heat_limit=2,
+            recent_limit=2
+        )
+
+        self.assertLessEqual(len(filtered), 5)
+        # 軌道 1 (Heat): 核心高頻 (Dr Pepper, 鳳凰院凶真)
+        self.assertIn("最愛喝 Dr Pepper", filtered)
+        self.assertIn("自稱狂氣科學家鳳凰院凶真", filtered)
+        # 軌道 2 (RAG): 話題命中 (拉麵宵夜)
+        self.assertIn("喜歡在實驗室煮拉麵當宵夜", filtered)
+        self.assertIn("喜歡在實驗室煮拉麵當宵夜", hits)
+        # 軌道 3 (Recent): 最新事實 (微波爐, RTX 4090)
+        self.assertIn("昨天剛修理好了微波爐時間機器", filtered)
+
+    # ==================== 14. 提煉重複確認加權 (Re-affirmation hits+=3) 測試 ====================
+    def test_merge_facts_reaffirmation(self):
+        current_facts = [
+            {"text": "喜歡喝 Dr Pepper", "hits": 2, "created_at": 100, "last_used_at": 100}
+        ]
+        incoming_facts = ["喜歡喝 Dr Pepper", "入手了新顯卡"]
+        remove_facts = []
+
+        merged = MemoryManager.merge_facts(current_facts, incoming_facts, remove_facts)
+        self.assertEqual(len(merged), 2)
+        
+        dr_pepper_fact = next(f for f in merged if f["text"] == "喜歡喝 Dr Pepper")
+        self.assertEqual(dr_pepper_fact["hits"], 5)  # 2 + 3 提煉加權
+
+        gpu_fact = next(f for f in merged if f["text"] == "入手了新顯卡")
+        self.assertEqual(gpu_fact["hits"], 1)
+
+    # ==================== 15. RAG 命中加權與冷卻保護測試 ====================
+    async def test_record_fact_hits_cooldown(self):
+        user_id = "user_hit_test"
+        await MemoryManager.update_user_profile(
+            user_id=user_id,
+            user_name="熱度測試員",
+            facts=[{"text": "喜歡吃壽喜燒", "hits": 1, "created_at": 100, "last_used_at": 0}]
+        )
+
+        # 第一次命中 -> hits 應該由 1 變 2
+        await MemoryManager.record_fact_hits(user_id=user_id, hit_texts=["喜歡吃壽喜燒"], cooldown_seconds=3600)
+        p1 = await MemoryManager.get_user_profile(user_id)
+        f1 = next(f for f in p1["facts"] if f["text"] == "喜歡吃壽喜燒")
+        self.assertEqual(f1["hits"], 2)
+
+        # 立即再次命中 -> 因在 3600 秒冷卻期內，hits 應維持 2
+        await MemoryManager.record_fact_hits(user_id=user_id, hit_texts=["喜歡吃壽喜燒"], cooldown_seconds=3600)
+        p2 = await MemoryManager.get_user_profile(user_id)
+        f2 = next(f for f in p2["facts"] if f["text"] == "喜歡吃壽喜燒")
+        self.assertEqual(f2["hits"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -106,6 +106,20 @@ ENABLE_HISTORY_RECALL: bool = bool(_mem_cfg.get("enable_history_recall", True))
 HISTORY_RECALL_LIMIT: int = int(_mem_cfg.get("history_recall_limit", 4))
 DB_PATH: str = str(BASE_DIR / _mem_cfg.get("db_path", "data/friend_bot.db"))
 
+# 7.1 三軌事實記憶檢索 (3-Track Fact RAG & Heat) 設定
+_facts_rag_cfg = _mem_cfg.get("facts_rag", {})
+FACTS_SPEAKER_MAX_TOTAL: int = int(_facts_rag_cfg.get("speaker_max_total", 8))
+FACTS_SPEAKER_HEAT_LIMIT: int = int(_facts_rag_cfg.get("speaker_heat_limit", 2))
+FACTS_SPEAKER_RECENT_LIMIT: int = int(_facts_rag_cfg.get("speaker_recent_limit", 2))
+
+FACTS_OTHERS_MAX_TOTAL: int = int(_facts_rag_cfg.get("others_max_total", 3))
+FACTS_OTHERS_HEAT_LIMIT: int = int(_facts_rag_cfg.get("others_heat_limit", 1))
+FACTS_OTHERS_RECENT_LIMIT: int = int(_facts_rag_cfg.get("others_recent_limit", 1))
+
+FACTS_RAG_HIT_COOLDOWN_SECONDS: int = int(_facts_rag_cfg.get("rag_hit_cooldown_seconds", 3600))
+FACTS_EXTRACTION_REAFFIRM_BONUS: int = int(_facts_rag_cfg.get("extraction_reaffirm_bonus", 3))
+FACTS_RAG_HIT_BONUS: int = int(_facts_rag_cfg.get("rag_hit_bonus", 1))
+
 # 8. 好感度與人際進展 (Favorability) 設定
 _fav_cfg = _yaml_config.get("favorability", {})
 ENABLE_FAVORABILITY: bool = bool(_fav_cfg.get("enable_favorability", True))

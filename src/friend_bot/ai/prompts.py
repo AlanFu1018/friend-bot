@@ -72,7 +72,8 @@ def format_memory_context(
 
         facts = user_profile.get("facts", [])
         if facts:
-            profile_lines.append("- 已知特徵/喜好: " + "、".join(facts))
+            fact_strings = [f["text"] if isinstance(f, dict) else str(f) for f in facts]
+            profile_lines.append("- 已知特徵/喜好: " + "、".join(fact_strings))
         notes = user_profile.get("interaction_notes", "")
         if notes:
             profile_lines.append(f"- 互動印象與習慣:\n{notes}")
@@ -87,7 +88,8 @@ def format_memory_context(
             o_notes = o_profile.get("interaction_notes", "")
             o_tier = o_profile.get("relationship_tier", "familiar")
             
-            fact_str = "、".join(o_facts) if o_facts else "尚無特定記錄"
+            fact_strings = [f["text"] if isinstance(f, dict) else str(f) for f in o_facts]
+            fact_str = "、".join(fact_strings) if fact_strings else "尚無特定記錄"
             note_str = o_notes if o_notes else "尚無特別印象"
             
             other_lines.append(f"- 用戶名稱: {o_name} (關係階級: {o_tier})")
@@ -182,7 +184,8 @@ def build_multi_entity_extraction_prompt(
     """
     speaker_name = speaker.get("user_name", "當前發言者")
     speaker_id = str(speaker.get("user_id", ""))
-    speaker_facts = "、".join(speaker.get("facts", [])) or "尚無"
+    raw_sp_facts = speaker.get("facts", [])
+    speaker_facts = "、".join([f["text"] if isinstance(f, dict) else str(f) for f in raw_sp_facts]) or "尚無"
     speaker_notes = speaker.get("interaction_notes", "") or "尚無"
     speaker_fav = speaker.get("favorability", 30)
 
@@ -192,7 +195,8 @@ def build_multi_entity_extraction_prompt(
         for u in other_users:
             u_name = u.get("user_name", "群友")
             u_id = str(u.get("user_id", ""))
-            u_facts = "、".join(u.get("facts", [])) or "尚無"
+            raw_u_facts = u.get("facts", [])
+            u_facts = "、".join([f["text"] if isinstance(f, dict) else str(f) for f in raw_u_facts]) or "尚無"
             u_notes = u.get("interaction_notes", "") or "尚無"
             lines.append(f"- 【{u_name}】(ID: {u_id}):\n  • 目前事實: {u_facts}\n  • 目前印象: {u_notes}")
         other_users_text = "\n".join(lines)
@@ -273,7 +277,8 @@ def build_batch_dialogue_extraction_prompt(
     for p in known_profiles:
         u_name = p.get("user_name", "未知群友")
         u_id = str(p.get("user_id", ""))
-        facts_str = "、".join(p.get("facts", [])) or "尚無"
+        raw_p_facts = p.get("facts", [])
+        facts_str = "、".join([f["text"] if isinstance(f, dict) else str(f) for f in raw_p_facts]) or "尚無"
         notes_str = p.get("interaction_notes", "") or "尚無"
         fav_val = p.get("favorability", 30)
         profiles_text_list.append(f"- 【{u_name}】(ID: {u_id}, 目前好感: {fav_val}):\n  • 目前事實: {facts_str}\n  • 目前印象: {notes_str}")

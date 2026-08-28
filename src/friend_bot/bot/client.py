@@ -16,7 +16,13 @@ from src.friend_bot.core.config import (
     ENABLE_BURST_REPLY,
     BURST_WINDOW_SECONDS,
     BURST_MIN_USER_COUNT,
-    BURST_MAX_MESSAGES
+    BURST_MAX_MESSAGES,
+    FACTS_SPEAKER_MAX_TOTAL,
+    FACTS_SPEAKER_HEAT_LIMIT,
+    FACTS_SPEAKER_RECENT_LIMIT,
+    FACTS_OTHERS_MAX_TOTAL,
+    FACTS_OTHERS_HEAT_LIMIT,
+    FACTS_OTHERS_RECENT_LIMIT
 )
 from src.friend_bot.memory import MemoryManager
 from src.friend_bot.bot.utils.alarm import AlarmScheduler
@@ -66,137 +72,223 @@ class FriendBotClient(
         )
 
     async def setup_hook(self):
-        """註冊各 Mixin 模組中 Discord 原生 /kurisu- 開頭的 Slash 指令"""
+        """Bot 啟動時自動掛載與註冊所有 Mixin 指令"""
+        logger.info("正在註冊所有 Slash 指令至 CommandTree...")
         self.register_help_commands()
         self.register_search_commands()
         self.register_profile_commands()
         self.register_alarm_commands()
         self.register_calendar_commands()
-        logger.info("已成功註冊說明 (help)、搜尋 (search)、畫像 (profile)、鬧鐘 (alarm) 與行事曆 (calendar) Slash 指令實作")
 
-    async def on_ready(self):
-        logger.info(f"✨ 機器人登入成功！身份: {self.user} (ID: {self.user.id})")
-        logger.info(f"🎭 機器人人設名稱: {BOT_NAME}")
-        logger.info(f"💬 回覆頻道列表 (REPLY_CHANNEL_IDS): {REPLY_CHANNEL_IDS or '全部頻道 (無限制)'}")
-        logger.info(f"👂 純監聽頻道列表 (LISTEN_CHANNEL_IDS): {LISTEN_CHANNEL_IDS or '無'}")
+        # 同步指令至 Discord 伺服器
+        try:
+            synced = await self.tree.sync()
+            logger.info(f"Slash 指令同步成功，共註冊 {len(synced)} 個指令")
+        except Exception as e:
+            logger.error(f"Slash 指令同步失敗: {e}", exc_info=True)
 
-        # 啟動獨立定時鬧鐘與行事曆後台調度器
+        # 啟動背景定時排程器
         self.alarm_scheduler.start()
         self.calendar_scheduler.start()
 
-        # 同步全域 Slash 指令樹
-        try:
-            synced = await self.tree.sync()
-            logger.info(f"⚡ [Slash Commands] 已成功向 Discord 全域同步 {len(synced)} 個指令: {[cmd.name for cmd in synced]}")
-        except Exception as e:
-            logger.error(f"❌ 同步 Slash 指令至 Discord 時發生錯誤: {e}", exc_info=True)
+    async def on_ready(self):
+        logger.info(f"機器人已成功登入為: {self.user} (ID: {self.user.id})")
+        logger.info(f"回覆頻道 (Reply Channels): {REPLY_CHANNEL_IDS}")
+        logger.info(f"監聽頻道 (Listen Channels): {LISTEN_CHANNEL_IDS}")
+        logger.info(f"Burst 聚合模式: {'已啟用' if ENABLE_BURST_REPLY else '未啟用'}")
 
-    async def _handle_buffered_chat(
-        self,
-        channel_id: str,
-        messages: List[discord.Message],
-        is_burst: bool
-    ) -> None:
-        """
-        處理從 BurstBufferManager 釋放的一批訊息（單人或多人群聊 Burst）
-        """
+    async def on_message(self, message: discord.Message):
+        """訊息事件處理器：支援監聽頻道批次提煉與主頻道 Burst 聚合回覆緩衝區"""
+        if message.author.bot or message.author == self.user:
+            return
+
+        channel_id = str(message.channel.id)
+
+        # 1. 監聽頻道模式 (純記錄與非同步記憶提煉)
+        if channel_id in LISTEN_CHANNEL_IDS:
+            logger.debug(f"[監聽頻道] 收到來自 {message.author.display_name} 的訊息: {message.clean_content}")
+            await MemoryManager.save_message(
+                message_id=str(message.id),
+                channel_id=channel_id,
+                user_id=str(message.author.id),
+                user_name=message.author.display_name,
+                content=message.clean_content,
+                has_image=bool(message.attachments),
+                is_bot=False,
+                timestamp=int(message.created_at.timestamp()),
+                extracted=False
+            )
+            await self.memory_extractor.add_listen_message(
+                channel_id=channel_id,
+                message_data={
+                    "message_id": str(message.id),
+                    "channel_id": channel_id,
+                    "user_id": str(message.author.id),
+                    "user_name": message.author.display_name,
+                    "content": message.clean_content,
+                    "has_image": bool(message.attachments),
+                    "timestamp": int(message.created_at.timestamp())
+                }
+            )
+            return
+
+        # 2. 主要對話頻道模式 (主動或被提及回覆)
+        if channel_id in REPLY_CHANNEL_IDS:
+            # 若啟用 Burst 模式，送入緩衝區由防抖視窗聚合處理
+            if ENABLE_BURST_REPLY:
+                await self.burst_manager.add_message(message=message, on_flush=self._on_burst_flush)
+            else:
+                # 傳統單則回覆模式
+                await self._handle_buffered_chat(channel=message.channel, messages=[message], is_burst=False)
+
+    async def _on_burst_flush(self, channel_id: str, messages: List[discord.Message], is_burst: bool):
+        """Burst 緩衝區到期或滿載時的回呼"""
+        if not messages:
+            return
+        channel = messages[0].channel
+        await self._handle_buffered_chat(channel=channel, messages=messages, is_burst=is_burst)
+
+    async def _handle_buffered_chat(self, channel: discord.abc.Messageable, messages: List[discord.Message], is_burst: bool):
+        """核心對話處理器：整合多實體記憶解析、三軌 RAG 檢索、好感度評估與 Burst 聚合回覆"""
         if not messages:
             return
 
-        first_msg = messages[0]
-        channel = first_msg.channel
+        channel_id = str(channel.id)
+        latest_msg = messages[-1]
+        latest_user_id = str(latest_msg.author.id)
+        latest_user_name = latest_msg.author.display_name
 
-        # 收集圖片附件
-        all_images = []
-        all_mime_types = []
-        for m in messages:
-            imgs, mimes = await download_image_attachments(m)
-            if imgs:
-                all_images.extend(imgs)
-                all_mime_types.extend(mimes)
-
-        async def _do_process():
-            try:
-                # 1. 取得這批訊息中所有出現過的使用者 ID 與提及對象
-                all_user_ids = list(set(str(m.author.id) for m in messages if not m.author.bot))
-                latest_msg = messages[-1]
-                latest_user_id = str(latest_msg.author.id)
-                latest_user_name = latest_msg.author.display_name
-
-                # JIT 按需統合：消化在場用戶在監聽頻道累積的訊息
-                for uid in all_user_ids:
-                    asyncio.create_task(self.memory_extractor.process_user_unextracted_messages(uid))
-
-                # 取出短期記憶與近期訊息 ID
-                short_term = await MemoryManager.get_short_term_context(channel_id)
-                recent_msg_ids = [str(m.get("message_id")) for m in short_term if m.get("message_id")]
-
-                # 組合本批訊息文本供多用戶畫像檢索
-                combined_content = " \n ".join([m.clean_content.strip() for m in messages if m.clean_content.strip()])
-
-                # 多人記憶檢索 (A + B + C 混合方案)
-                current_user_profile, other_user_profiles = await MemoryManager.resolve_multi_user_profiles(
-                    current_user_id=latest_user_id,
-                    content=combined_content,
-                    short_term_history=short_term,
-                    max_others=4
+        try:
+            # 儲存本批所有訊息至 SQLite
+            for m in messages:
+                await MemoryManager.save_message(
+                    message_id=str(m.id),
+                    channel_id=channel_id,
+                    user_id=str(m.author.id),
+                    user_name=m.author.display_name,
+                    content=m.clean_content,
+                    has_image=bool(m.attachments),
+                    is_bot=False,
+                    timestamp=int(m.created_at.timestamp()),
+                    extracted=False
                 )
 
-                # 行事曆排程摘要
-                calendar_summary = await CalendarManager.get_user_schedule_summary(latest_user_id)
+            all_user_ids = list(set(str(m.author.id) for m in messages))
 
-                # 跨頻道深度回憶
-                deep_history = []
-                if ENABLE_HISTORY_RECALL and combined_content:
-                    deep_history = await MemoryManager.recall_deep_history(
+            # JIT 按需整合：消化在場用戶在監聽頻道累積的訊息
+            for uid in all_user_ids:
+                asyncio.create_task(self.memory_extractor.process_unextracted_for_user(uid, latest_user_name))
+
+            # 取出短期記憶與近期訊息 ID
+            short_term = await MemoryManager.get_short_term_context(channel_id)
+            recent_msg_ids = [str(m.get("message_id")) for m in short_term if m.get("message_id")]
+
+            # 組合本批訊息文本供多用戶畫像檢索
+            combined_content = " \n ".join([m.clean_content.strip() for m in messages if m.clean_content.strip()])
+
+            # 多人記憶檢索 (A + B + C 混合方案)
+            current_user_profile, other_user_profiles = await MemoryManager.resolve_multi_user_profiles(
+                current_user_id=latest_user_id,
+                content=combined_content,
+                short_term_history=short_term,
+                max_others=4
+            )
+
+            # 三軌混合事實檢索 (Heat + RAG + Recent)
+            if current_user_profile:
+                filtered_facts, hit_facts = MemoryManager.filter_facts_three_tracks(
+                    facts_data=current_user_profile.get("facts", []),
+                    query_text=combined_content,
+                    max_total=FACTS_SPEAKER_MAX_TOTAL,
+                    heat_limit=FACTS_SPEAKER_HEAT_LIMIT,
+                    recent_limit=FACTS_SPEAKER_RECENT_LIMIT
+                )
+                current_user_profile["facts"] = filtered_facts
+                if hit_facts:
+                    asyncio.create_task(MemoryManager.record_fact_hits(latest_user_id, hit_facts))
+
+            if other_user_profiles:
+                for o_prof in other_user_profiles:
+                    o_uid = str(o_prof.get("user_id", ""))
+                    o_filtered, o_hits = MemoryManager.filter_facts_three_tracks(
+                        facts_data=o_prof.get("facts", []),
                         query_text=combined_content,
-                        exclude_message_ids=recent_msg_ids
+                        max_total=FACTS_OTHERS_MAX_TOTAL,
+                        heat_limit=FACTS_OTHERS_HEAT_LIMIT,
+                        recent_limit=FACTS_OTHERS_RECENT_LIMIT
                     )
+                    o_prof["facts"] = o_filtered
+                    if o_hits and o_uid:
+                        asyncio.create_task(MemoryManager.record_fact_hits(o_uid, o_hits))
 
-                # 組裝 Context
-                memory_context = format_memory_context(
-                    current_user_name=latest_user_name,
-                    user_profile=current_user_profile,
-                    deep_history=deep_history,
-                    short_term_history=short_term,
-                    calendar_summary=calendar_summary,
-                    other_user_profiles=other_user_profiles
+            # 行事曆排程摘要
+            calendar_summary = await CalendarManager.get_user_schedule_summary(latest_user_id)
+
+            # 跨頻道深度回憶
+            deep_history = []
+            if ENABLE_HISTORY_RECALL and combined_content:
+                deep_history = await MemoryManager.recall_deep_history(
+                    query_text=combined_content,
+                    exclude_message_ids=recent_msg_ids
                 )
 
-                # 根據是否為 Burst 模式組裝 Prompt
-                target_msg_obj = latest_msg
-                if is_burst and len(messages) >= 2:
-                    burst_meta_list = [
-                        {
-                            "message_id": str(m.id),
-                            "user_id": str(m.author.id),
-                            "user_name": m.author.display_name,
-                            "content": m.clean_content.strip() or "[發送了圖片]",
-                            "has_image": bool(m.attachments)
-                        }
-                        for m in messages
-                    ]
-                    prompt = build_burst_dialogue_prompt(
-                        memory_context=memory_context,
-                        burst_messages=burst_meta_list
-                    )
-                else:
-                    # 單人對話模式
-                    prompt = f"""{memory_context}
+            # 組裝 Context
+            memory_context = format_memory_context(
+                current_user_name=latest_user_name,
+                user_profile=current_user_profile,
+                deep_history=deep_history,
+                short_term_history=short_term,
+                calendar_summary=calendar_summary,
+                other_user_profiles=other_user_profiles
+            )
+
+            # 根據是否為 Burst 模式組裝 Prompt
+            target_msg_obj = latest_msg
+            if is_burst and len(messages) >= 2:
+                burst_meta_list = [
+                    {
+                        "message_id": str(m.id),
+                        "user_id": str(m.author.id),
+                        "user_name": m.author.display_name,
+                        "content": m.clean_content.strip() or "[發送了圖片]",
+                        "has_image": bool(m.attachments)
+                    }
+                    for m in messages
+                ]
+                prompt = build_burst_dialogue_prompt(
+                    memory_context=memory_context,
+                    burst_messages=burst_meta_list
+                )
+            else:
+                # 單人對話模式
+                prompt = f"""{memory_context}
 
 【當前用戶最新發言】:
 {latest_user_name}: {combined_content or '[發送了一張圖片]'}
 
 請以幽默風趣的群友風格回應 {latest_user_name}："""
 
-                # 呼叫 Gemini
+            # 收集圖片附件
+            all_attachments = []
+            for m in messages:
+                all_attachments.extend(m.attachments)
+            image_bytes_list = await download_image_attachments(all_attachments)
+
+            # 打字中提示
+            if SHOW_TYPING:
+                async with channel.typing():
+                    response_text = await self.gemini.generate_response(
+                        prompt=prompt,
+                        images=image_bytes_list if image_bytes_list else None
+                    )
+            else:
                 response_text = await self.gemini.generate_response(
                     prompt=prompt,
-                    images=all_images if all_images else None,
-                    image_mime_types=all_mime_types if all_mime_types else None
+                    images=image_bytes_list if image_bytes_list else None
                 )
 
-                # 解析 Burst 回覆標籤與引用目標
+            if response_text:
+                # 若為 Burst 模式，解析模型回傳的 [TARGET_ID: xxx]
                 if is_burst and len(messages) >= 2:
                     picked_target_id, clean_response_text = parse_burst_reply_response(
                         raw_text=response_text,
@@ -260,96 +352,29 @@ class FriendBotClient(
                             "channel_id": str(channel_id),
                             "user_id": str(m.author.id),
                             "user_name": m.author.display_name,
-                            "content": m.clean_content.strip(),
+                            "content": m.clean_content,
                             "has_image": bool(m.attachments),
-                            "timestamp": int(m.created_at.timestamp() if m.created_at else time.time())
+                            "timestamp": int(m.created_at.timestamp())
                         }
                         for m in messages
                     ]
-                    asyncio.create_task(self.memory_extractor.extract_from_dialogue_batch(dialogue_batch))
+                    asyncio.create_task(
+                        self.memory_extractor._process_batch_extraction(channel_id, dialogue_batch)
+                    )
                 else:
-                    if combined_content:
-                        asyncio.create_task(
-                            self.memory_extractor.extract_and_update(
-                                user_id=latest_user_id,
-                                user_name=latest_user_name,
-                                recent_messages=[combined_content],
-                                other_users=other_user_profiles
-                            )
+                    recent_texts = [m.clean_content for m in messages if m.clean_content.strip()]
+                    asyncio.create_task(
+                        self.memory_extractor.extract_and_update(
+                            user_id=latest_user_id,
+                            user_name=latest_user_name,
+                            recent_messages=recent_texts,
+                            other_users=other_user_profiles
                         )
+                    )
 
-            except Exception as e:
-                logger.error(f"處理對話訊息時發生異常: {e}", exc_info=True)
-                try:
-                    await channel.send(f"（發生了一點小狀況：{e}）")
-                except Exception:
-                    pass
-
-        if SHOW_TYPING:
-            async with channel.typing():
-                await _do_process()
-        else:
-            await _do_process()
-
-    async def on_message(self, message: discord.Message):
-        if message.author.bot or message.author == self.user:
-            return
-
-        channel_id = message.channel.id
-        is_reply_channel = (not REPLY_CHANNEL_IDS) or (channel_id in REPLY_CHANNEL_IDS)
-        is_listen_channel = channel_id in LISTEN_CHANNEL_IDS
-
-        if not is_reply_channel and not is_listen_channel:
-            return
-
-        content = message.clean_content.strip()
-        has_image = bool(message.attachments)
-
-        if not content and not has_image:
-            return
-
-        # 訊息註解過濾（若以 # 或 ＃ 開頭，則視為註解：在回覆頻道不回覆且不記憶，在監聽頻道亦排除不提煉）
-        if content.startswith("#") or content.startswith("＃"):
-            logger.debug(f"[註解過濾] 忽略以 '#' 開頭的訊息 - 頻道: {channel_id}, 發送者: {message.author.display_name}")
-            return
-
-        user_id = str(message.author.id)
-        user_name = message.author.display_name
-        msg_id = str(message.id)
-        current_ts = int(message.created_at.timestamp() if message.created_at else time.time())
-
-        # 1. 永久寫入資料庫（純監聽頻道 extracted=0，待批次處理；回覆頻道若為單人直接標記）
-        await MemoryManager.save_message(
-            message_id=msg_id,
-            channel_id=str(channel_id),
-            user_id=user_id,
-            user_name=user_name,
-            content=content or "[上傳了圖片]",
-            has_image=has_image,
-            is_bot=False,
-            timestamp=current_ts,
-            extracted=False
-        )
-
-        # 2. 純監聽頻道處理（方案 C：加入防抖隊列，累積滿或靜默定時批次提煉）
-        if is_listen_channel and not is_reply_channel:
-            logger.debug(f"[監聽模式] 記錄頻道 #{message.channel.name if hasattr(message.channel, 'name') else channel_id} 訊息 - {user_name}")
-            self.memory_extractor.add_to_listen_queue(
-                str(channel_id),
-                {
-                    "message_id": msg_id,
-                    "channel_id": str(channel_id),
-                    "user_id": user_id,
-                    "user_name": user_name,
-                    "content": content or "[上傳了圖片]",
-                    "has_image": has_image,
-                    "timestamp": current_ts
-                }
-            )
-            return
-
-        # 3. 主回覆頻道對話處理（若開啟 Burst 聚合，則加入滑動窗口緩衝隊列）
-        if ENABLE_BURST_REPLY:
-            await self.burst_manager.add_message(message, self._handle_buffered_chat)
-        else:
-            await self._handle_buffered_chat(str(channel_id), [message], is_burst=False)
+        except Exception as e:
+            logger.error(f"對話處理失敗: {e}", exc_info=True)
+            try:
+                await channel.send("（糟糕……世界線似乎發生了未知的變動，我的神經迴路暫時打結了……）")
+            except Exception:
+                pass
