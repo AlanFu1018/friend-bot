@@ -1,51 +1,56 @@
-import discord
-from discord import app_commands
-import logging
 import asyncio
 import time
 import random
-from typing import Optional, List, Dict, Any
+from typing import List, Optional
+import discord
+from discord import app_commands
 
 from src.friend_bot.core.config import (
     BOT_NAME,
-    ENABLE_HISTORY_RECALL,
-    SHOW_TYPING,
-    TYPING_DELAY_RANGE,
     REPLY_CHANNEL_IDS,
     LISTEN_CHANNEL_IDS,
+    SHOW_TYPING,
     ENABLE_BURST_REPLY,
     BURST_WINDOW_SECONDS,
     BURST_MIN_USER_COUNT,
     BURST_MAX_MESSAGES,
+    TYPING_DELAY_RANGE,
+    ENABLE_HISTORY_RECALL,
     FACTS_SPEAKER_MAX_TOTAL,
     FACTS_SPEAKER_HEAT_LIMIT,
     FACTS_SPEAKER_RECENT_LIMIT,
     FACTS_OTHERS_MAX_TOTAL,
     FACTS_OTHERS_HEAT_LIMIT,
-    FACTS_OTHERS_RECENT_LIMIT
+    FACTS_OTHERS_RECENT_LIMIT,
 )
-from src.friend_bot.memory import MemoryManager
-from src.friend_bot.bot.utils.alarm import AlarmScheduler
-from src.friend_bot.bot.utils.calendar import CalendarManager, CalendarScheduler
-from src.friend_bot.bot.utils.burst import BurstBufferManager
-from src.friend_bot.ai import GeminiClient, MemoryExtractor
+from src.friend_bot.core.logger import get_logger
+from src.friend_bot.ai.gemini_client import GeminiClient
+from src.friend_bot.ai.memory_extractor import MemoryExtractor
 from src.friend_bot.ai.prompts import (
     format_memory_context,
     build_burst_dialogue_prompt,
     parse_burst_reply_response
 )
 from src.friend_bot.bot.handlers import download_image_attachments, split_message
+from src.friend_bot.bot.utils import (
+    AlarmManager,
+    AlarmScheduler,
+    CalendarManager,
+    CalendarScheduler,
+    BurstBufferManager
+)
+from src.friend_bot.memory import MemoryManager
+
+# 導入所有 Mixin 指令模組
 from src.friend_bot.bot.commands import (
     HelpCommandsMixin,
     SearchCommandsMixin,
     ProfileCommandsMixin,
     AlarmCommandsMixin,
-    CalendarCommandsMixin,
-    TIER_NAME_MAP,
-    render_favorability_bar
+    CalendarCommandsMixin
 )
 
-logger = logging.getLogger("friend_bot.bot")
+logger = get_logger("client")
 
 
 class FriendBotClient(
@@ -272,19 +277,21 @@ class FriendBotClient(
             all_attachments = []
             for m in messages:
                 all_attachments.extend(m.attachments)
-            image_bytes_list = await download_image_attachments(all_attachments)
+            image_bytes_list, image_mime_types = await download_image_attachments(all_attachments)
 
             # 打字中提示
             if SHOW_TYPING:
                 async with channel.typing():
                     response_text = await self.gemini.generate_response(
                         prompt=prompt,
-                        images=image_bytes_list if image_bytes_list else None
+                        images=image_bytes_list if image_bytes_list else None,
+                        image_mime_types=image_mime_types if image_mime_types else None
                     )
             else:
                 response_text = await self.gemini.generate_response(
                     prompt=prompt,
-                    images=image_bytes_list if image_bytes_list else None
+                    images=image_bytes_list if image_bytes_list else None,
+                    image_mime_types=image_mime_types if image_mime_types else None
                 )
 
             if response_text:
@@ -359,22 +366,20 @@ class FriendBotClient(
                         for m in messages
                     ]
                     asyncio.create_task(
-                        self.memory_extractor._process_batch_extraction(channel_id, dialogue_batch)
+                        self.memory_extractor.process_burst_dialogue(
+                            dialogue_messages=dialogue_batch,
+                            channel_id=channel_id
+                        )
                     )
                 else:
-                    recent_texts = [m.clean_content for m in messages if m.clean_content.strip()]
                     asyncio.create_task(
                         self.memory_extractor.extract_and_update(
                             user_id=latest_user_id,
                             user_name=latest_user_name,
-                            recent_messages=recent_texts,
+                            recent_messages=[m.clean_content for m in messages if m.clean_content.strip()],
                             other_users=other_user_profiles
                         )
                     )
 
         except Exception as e:
             logger.error(f"對話處理失敗: {e}", exc_info=True)
-            try:
-                await channel.send("（糟糕……世界線似乎發生了未知的變動，我的神經迴路暫時打結了……）")
-            except Exception:
-                pass

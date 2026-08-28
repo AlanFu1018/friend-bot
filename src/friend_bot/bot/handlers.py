@@ -1,6 +1,6 @@
 import aiohttp
 import re
-from typing import List, Tuple
+from typing import List, Tuple, Any, Union
 import discord
 from src.friend_bot.core.config import (
     MAX_MESSAGE_LENGTH,
@@ -19,17 +19,40 @@ SUPPORTED_IMAGE_TYPES = {
     "image/heif"
 }
 
-async def download_image_attachments(message: discord.Message) -> Tuple[List[bytes], List[str]]:
-    """下載 Discord 訊息中的圖片附件並回傳位元組與 MIME 類型"""
-    images = []
-    mime_types = []
+async def download_image_attachments(
+    target: Any
+) -> Tuple[List[bytes], List[str]]:
+    """
+    下載 Discord 訊息或附件清單中的圖片附件並回傳位元組與 MIME 類型。
+    相容傳入 discord.Message、List[discord.Message]、List[discord.Attachment] 或單一 discord.Attachment。
+    """
+    images: List[bytes] = []
+    mime_types: List[str] = []
 
-    if not message.attachments:
+    if target is None:
+        return images, mime_types
+
+    attachments: List[discord.Attachment] = []
+    if isinstance(target, discord.Message):
+        attachments = list(target.attachments)
+    elif isinstance(target, discord.Attachment):
+        attachments = [target]
+    elif isinstance(target, (list, tuple)):
+        for item in target:
+            if isinstance(item, discord.Message):
+                attachments.extend(item.attachments)
+            elif isinstance(item, discord.Attachment):
+                attachments.append(item)
+            elif hasattr(item, "attachments"):
+                attachments.extend(getattr(item, "attachments"))
+    elif hasattr(target, "attachments"):
+        attachments = list(getattr(target, "attachments"))
+
+    if not attachments:
         return images, mime_types
 
     async with aiohttp.ClientSession() as session:
-        for attachment in message.attachments:
-            # 檢查 Content-Type 或副檔名
+        for attachment in attachments:
             content_type = attachment.content_type or ""
             is_image = any(content_type.startswith(t) for t in ["image/jpeg", "image/png", "image/webp", "image/gif"])
             if not is_image:

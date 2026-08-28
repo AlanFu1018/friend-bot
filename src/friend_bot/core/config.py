@@ -34,22 +34,25 @@ def _load_yaml_config() -> Dict[str, Any]:
 
 _yaml_config = _load_yaml_config()
 
-# Helper to parse channel IDs from YAML or ENV
-def _parse_channel_ids(yaml_ids: Any, env_name: str) -> List[int]:
+# Helper to parse channel IDs from YAML or ENV as strings
+def _parse_channel_ids(yaml_ids: Any, env_name: str) -> List[str]:
     result_set = set()
     if isinstance(yaml_ids, list):
         for cid in yaml_ids:
-            try:
-                result_set.add(int(cid))
-            except (ValueError, TypeError):
-                pass
+            clean = str(cid).strip()
+            if clean:
+                result_set.add(clean)
+    elif yaml_ids:
+        clean = str(yaml_ids).strip()
+        if clean:
+            result_set.add(clean)
 
     env_val = os.getenv(env_name, "")
     if env_val.strip():
         for cid_str in env_val.split(","):
             cid_clean = cid_str.strip()
-            if cid_clean.isdigit():
-                result_set.add(int(cid_clean))
+            if cid_clean:
+                result_set.add(cid_clean)
 
     return list(result_set)
 
@@ -59,8 +62,8 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
 # 2. Bot 頻道與行為設定
 _bot_cfg = _yaml_config.get("bot", {})
-REPLY_CHANNEL_IDS: List[int] = _parse_channel_ids(_bot_cfg.get("reply_channel_ids"), "REPLY_CHANNEL_IDS")
-LISTEN_CHANNEL_IDS: List[int] = _parse_channel_ids(_bot_cfg.get("listen_channel_ids"), "LISTEN_CHANNEL_IDS")
+REPLY_CHANNEL_IDS: List[str] = _parse_channel_ids(_bot_cfg.get("reply_channel_ids"), "REPLY_CHANNEL_IDS")
+LISTEN_CHANNEL_IDS: List[str] = _parse_channel_ids(_bot_cfg.get("listen_channel_ids"), "LISTEN_CHANNEL_IDS")
 SHOW_TYPING: bool = _bot_cfg.get("show_typing", True)
 MAX_MESSAGE_LENGTH: int = _bot_cfg.get("max_message_length", 2000)
 
