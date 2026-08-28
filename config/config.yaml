@@ -5,10 +5,10 @@
 # Discord 機器人頻道與行為設定
 bot:
   # 【互動與回覆頻道】機器人在該頻道發言並與大家聊天的專屬頻道 ID 列表
-  reply_channel_ids: []
+  reply_channel_ids: [1542526624979878019]
 
   # 【純監聽與記憶頻道】機器人會默默旁聽、記錄對話歷史並更新用戶特徵，但「不會主動回覆」的頻道 ID 列表
-  listen_channel_ids: []
+  listen_channel_ids: [935055001062088724, 1455531125589151899, 1367033661202890794, 1182995033977262130, 1494312628527300648]
   
   # 是否在生成回應時顯示 Discord 的「正在輸入... (Typing)」狀態
   show_typing: true
@@ -62,7 +62,13 @@ gemini:
   model: "gemini-3.1-flash-lite"
   
   # 溫度值 (0.0 ~ 2.0)：數值越高越隨機幽默，數值越低越精準嚴謹
-  temperature: 0.85
+  temperature: 0.88
+  
+  # 頻率懲罰 (0.0 ~ 2.0)：數值越高越能抑制模型重複使用相同的詞彙與顏文字，增強回答多樣性（建議 0.2 ~ 0.5）
+  frequency_penalty: 0.39
+  
+  # 存在懲罰 (0.0 ~ 2.0)：數值越高越傾向引入新話題與多樣性表達
+  presence_penalty: 0.0
   
   # 單次最大生成 Token 數
   max_output_tokens: 2048
@@ -83,9 +89,9 @@ memory:
     speaker_recent_limit: 2   # 軌道 3：最新近況事實數量上限
     
     # 在場 / 被提及其他群友 (In-context / Others) 事實配額設定
-    others_max_total: 5       # 每位其他群友最多帶入的事實總數
-    others_heat_limit: 2      # 軌道 1：核心高頻事實數量上限
-    others_recent_limit: 2    # 軌道 3：最新近況事實數量上限
+    others_max_total: 3       # 每位其他群友最多帶入的事實總數
+    others_heat_limit: 1      # 軌道 1：核心高頻事實數量上限
+    others_recent_limit: 1    # 軌道 3：最新近況事實數量上限
     
     # 雙重熱度加權與防刷設定
     rag_hit_cooldown_seconds: 3600  # 即時對話 RAG 命中加權冷卻時間（秒，預設 1 小時）
@@ -103,7 +109,7 @@ memory:
 
 # 好感度與人際進展 (Favorability & Progression) 設定
 favorability:
-  # 是否啟用動態好感度與人際關係進展系統
+  # 是否開啟動態好感度與人際關係進展系統
   enable_favorability: true
 
   # 新用戶初始預設好感度數值 (0 ~ 100)

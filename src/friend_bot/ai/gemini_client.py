@@ -6,6 +6,8 @@ from src.friend_bot.core.config import (
     GEMINI_API_KEY,
     GEMINI_MODEL,
     GEMINI_TEMPERATURE,
+    GEMINI_FREQUENCY_PENALTY,
+    GEMINI_PRESENCE_PENALTY,
     GEMINI_MAX_OUTPUT_TOKENS,
     ENABLE_WEB_SEARCH,
     SEARCH_TOP_K,
@@ -55,6 +57,8 @@ class GeminiClient:
         system_instruction: Optional[str] = None,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
+        frequency_penalty: Optional[float] = None,
+        presence_penalty: Optional[float] = None,
         enable_tools: bool = True
     ) -> str:
         """
@@ -67,12 +71,16 @@ class GeminiClient:
         sys_inst = system_instruction or build_system_instruction()
         temp = temperature if temperature is not None else GEMINI_TEMPERATURE
         max_tok = max_tokens if max_tokens is not None else GEMINI_MAX_OUTPUT_TOKENS
+        freq_pen = frequency_penalty if frequency_penalty is not None else GEMINI_FREQUENCY_PENALTY
+        pres_pen = presence_penalty if presence_penalty is not None else GEMINI_PRESENCE_PENALTY
         tools = self._get_tools() if enable_tools else None
 
         config = types.GenerateContentConfig(
             system_instruction=sys_inst,
             temperature=temp,
             max_output_tokens=max_tok,
+            frequency_penalty=freq_pen,
+            presence_penalty=pres_pen,
             tools=tools
         )
 
@@ -92,7 +100,7 @@ class GeminiClient:
         contents.append(prompt)
 
         try:
-            logger.debug(f"向模型 [{self.model}] 發送生成請求 (溫度: {temp}, 聯網工具: {bool(tools)})...")
+            logger.debug(f"向模型 [{self.model}] 發送生成請求 (溫度: {temp}, 頻率懲罰: {freq_pen}, 聯網工具: {bool(tools)})...")
 
             # 若啟用了 tools，使用 aio.chats 進行多輪 Tool Calling 對話循環
             if tools:
@@ -131,5 +139,5 @@ class GeminiClient:
                 return response.text.strip() if response and response.text else "（思考中斷了，請再說一次看看～）"
 
         except Exception as e:
-            logger.error(f"Gemini API 生成失敗: {e}", exc_info=True)
-            return f"（遇到了一點小故障：{e}）"
+            logger.error(f"Gemini 生成回應失敗: {e}", exc_info=True)
+            return "（剛才走神了，能再跟我說一次嗎？）"

@@ -98,8 +98,10 @@ CALENDAR_AVATAR_URL: str = os.getenv("CALENDAR_AVATAR_URL", _cal_cfg.get("avatar
 # 6. Gemini 模型設定
 _gemini_cfg = _yaml_config.get("gemini", {})
 GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", _gemini_cfg.get("model", "gemini-3.1-flash-lite"))
-GEMINI_TEMPERATURE: float = float(_gemini_cfg.get("temperature", 0.85))
-GEMINI_MAX_OUTPUT_TOKENS: int = int(_gemini_cfg.get("max_output_tokens", 2048))
+GEMINI_TEMPERATURE: float = float(os.getenv("GEMINI_TEMPERATURE", _gemini_cfg.get("temperature", 0.88)))
+GEMINI_FREQUENCY_PENALTY: float = float(os.getenv("GEMINI_FREQUENCY_PENALTY", _gemini_cfg.get("frequency_penalty", 0.3)))
+GEMINI_PRESENCE_PENALTY: float = float(os.getenv("GEMINI_PRESENCE_PENALTY", _gemini_cfg.get("presence_penalty", 0.0)))
+GEMINI_MAX_OUTPUT_TOKENS: int = int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", _gemini_cfg.get("max_output_tokens", 2048)))
 
 # 7. 記憶系統設定
 _mem_cfg = _yaml_config.get("memory", {})
