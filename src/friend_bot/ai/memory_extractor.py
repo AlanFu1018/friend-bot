@@ -12,7 +12,9 @@ from src.friend_bot.core.config import (
     ENABLE_FAVORABILITY,
     DEFAULT_FAVORABILITY,
     DAILY_GAIN_LIMIT,
-    DAILY_LOSS_LIMIT
+    DAILY_LOSS_LIMIT,
+    LISTEN_DEBOUNCE_SECONDS,
+    EXTRACTION_SWEEP_INTERVAL_SECONDS
 )
 
 logger = get_logger("extractor")
@@ -73,13 +75,29 @@ class MemoryExtractor:
             if uid not in speaker_uids:
                 speaker_uids.append(uid)
 
-        # 【權威名稱】一律取自 Discord 訊息本身，絕不採用模型輸出的名字
+        # Discord 權威 @提及清單（由呼叫端從 message.mentions 帶入）
+        explicit_mentions: List[Dict[str, str]] = []
+        seen_mention_uids: Set[str] = set()
+        for m in human_msgs:
+            for item in (m.get("mentions") or []):
+                mid = str(item.get("user_id", "")).strip()
+                if mid and mid not in seen_mention_uids:
+                    seen_mention_uids.add(mid)
+                    explicit_mentions.append(
+                        {"user_id": mid, "user_name": str(item.get("user_name") or "").strip()}
+                    )
+
+        # 【權威名稱】一律取自 Discord（訊息作者 + 被 @提及者），絕不採用模型輸出的名字。
+        # 被提及者也必須納入：否則首次被提及而尚無畫像的人，建檔時名字會退回模型輸出。
         names: Dict[str, str] = dict(authoritative_names or {})
         for m in human_msgs:
             uid = str(m["user_id"])
             msg_name = str(m.get("user_name") or "").strip()
             if msg_name:
                 names[uid] = msg_name
+        for item in explicit_mentions:
+            if item["user_name"]:
+                names.setdefault(item["user_id"], item["user_name"])
 
         combined_content = "\n".join(
             str(m.get("content", "")) for m in human_msgs if str(m.get("content", "")).strip()
@@ -87,7 +105,9 @@ class MemoryExtractor:
 
         # 【統一白名單】發言者 + 訊息中被提及的人（與回覆端共用同一份解析邏輯）
         mentioned_uids = await MemoryManager.resolve_mentioned_user_ids(
-            combined_content, exclude_uids=set(speaker_uids)
+            combined_content,
+            exclude_uids=set(speaker_uids),
+            explicit_mentions=explicit_mentions
         )
         allowed_uids: Set[str] = set(speaker_uids) | set(mentioned_uids)
 
@@ -397,9 +417,9 @@ class MemoryExtractor:
         self,
         channel_id: str,
         message_data: Dict[str, Any],
-        debounce_seconds: float = 4.0
+        debounce_seconds: float = LISTEN_DEBOUNCE_SECONDS
     ) -> None:
-        """監聽頻道訊息防抖收集器"""
+        """監聽頻道訊息防抖收集器（防抖秒數見 config.yaml 的 listen_debounce_seconds）"""
         if not ENABLE_AUTO_MEMORY_EXTRACTION:
             return
 
@@ -455,8 +475,8 @@ class MemoryExtractor:
             await self.extract_dialogue(msgs, cid)
         return len(pending)
 
-    def start_sweeper(self, interval_seconds: float = 600.0) -> None:
-        """啟動低頻背景撿漏任務"""
+    def start_sweeper(self, interval_seconds: float = EXTRACTION_SWEEP_INTERVAL_SECONDS) -> None:
+        """啟動低頻背景撿漏任務（間隔見 config.yaml 的 extraction_sweep_interval_seconds）"""
         if self._sweeping:
             return
         self._sweeping = True

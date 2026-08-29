@@ -36,6 +36,19 @@ STOPWORDS: Set[str] = {
     "應該", "然後", "其實", "這樣", "那樣", "一起", "還有", "一個", "一些"
 }
 
+# 含「不 / 沒」但語意上並非否定的常見詞。偵測否定前先剔除，避免把「覺得不錯」
+# 這類正面敘述誤判為否定。
+NON_NEGATION_WORDS: Tuple[str, ...] = (
+    "不錯", "不過", "不但", "不僅", "不只", "不外乎", "差不多",
+    "對不起", "了不起", "不好意思", "不得了", "要不然", "捨不得"
+)
+
+# 英文否定標記
+NEGATION_PATTERN_EN = re.compile(
+    r"\b(?:not|never|no longer|isn'?t|aren'?t|wasn'?t|weren'?t|don'?t|doesn'?t|"
+    r"didn'?t|won'?t|can'?t|cannot|stopped|quit|dislikes?|disliked)\b"
+)
+
 class MemoryManager:
     """三層記憶管理器：負責儲存與檢索短期對話、長期畫像、好感度與跨頻道歷史回憶"""
 
@@ -173,6 +186,75 @@ class MemoryManager:
         return [f["text"] if isinstance(f, dict) else str(f) for f in facts_raw]
 
     @staticmethod
+    def has_negation(text: str) -> bool:
+        """
+        判斷一段事實文字是否帶有否定語意。
+
+        用途是辨識「新事實推翻舊事實」的情況：舊事實「喜歡台北」與新事實
+        「已經不喜歡台北了」在字面上是包含關係，若不看否定詞會被誤判為「重複確認」，
+        導致錯誤事實被加權、更正被丟棄。
+
+        判斷刻意保守——**寧可漏判也不要誤判**。漏判只會退回原本的「重複確認」行為，
+        誤判卻會刪掉一條仍然成立的事實。因此：
+        - 只採用「不 / 沒」這兩個相對可靠的中文否定標記；
+        - 先剔除「不錯 / 不過 / 差不多」等含「不」卻非否定的常見詞；
+        - 不採用「未 / 無 / 非」，因為「未來」「無聊」「非常」等常見詞會造成大量誤判
+          （「非常喜歡台北」若被判為否定，就會把「喜歡台北」誤刪）。
+        """
+        cleaned = (text or "").lower()
+        for word in NON_NEGATION_WORDS:
+            cleaned = cleaned.replace(word, "")
+
+        if "不" in cleaned or "沒" in cleaned:
+            return True
+        return bool(NEGATION_PATTERN_EN.search(cleaned))
+
+    @staticmethod
+    def topic_key(text: str) -> str:
+        """
+        取出一段事實「去掉否定詞後的主題」，用於判斷兩條事實是否在談同一件事。
+
+        否定極性的比對必須先能配對到同一主題才有意義。若直接比對原文，
+        「不喜歡吃辣」與「現在喜歡吃辣了」不成子字串關係（「不」破壞了包含性），
+        兩條互相矛盾的事實會被當成不相干而同時保留。去掉否定詞後兩者的主題
+        都是「喜歡吃辣」，才能配對成功並辨識出極性相反。
+
+        「不錯」「不過」這類含「不」卻非否定的詞會先被保護起來，不參與剝除。
+        """
+        cleaned = (text or "").lower()
+
+        placeholders: Dict[str, str] = {}
+        for idx, word in enumerate(NON_NEGATION_WORDS):
+            if word in cleaned:
+                key = f"\x01{idx}\x01"
+                placeholders[key] = word
+                cleaned = cleaned.replace(word, key)
+
+        cleaned = cleaned.replace("不", "").replace("沒", "")
+        cleaned = NEGATION_PATTERN_EN.sub(" ", cleaned)
+
+        for key, word in placeholders.items():
+            cleaned = cleaned.replace(key, word)
+
+        return re.sub(r"\s+", " ", cleaned).strip()
+
+    @staticmethod
+    def _is_same_topic(key_a: str, key_b: str) -> bool:
+        """
+        判斷兩個主題字串是否指向同一件事。
+
+        極短的主題（少於 2 字）只接受完全相同，避免剝除否定詞後殘留的單字
+        （如「不去」→「去」）到處誤配。
+        """
+        if not key_a or not key_b:
+            return False
+        if key_a == key_b:
+            return True
+        if min(len(key_a), len(key_b)) < 2:
+            return False
+        return key_a in key_b or key_b in key_a
+
+    @staticmethod
     def merge_facts(
         current_facts_raw: Any,
         incoming_facts_raw: Any,
@@ -180,9 +262,11 @@ class MemoryManager:
         reaffirm_bonus: int = FACTS_EXTRACTION_REAFFIRM_BONUS
     ) -> List[Dict[str, Any]]:
         """
-        合併與更新事實清單（含更正刪除與提煉重複確認加權）：
+        合併與更新事實清單（含更正刪除、否定推翻與提煉重複確認加權）：
         1. 依 remove_facts_raw 剔除被推翻的舊事實。
-        2. 若新提取的事實已存在，增加熱度權重 hits += reaffirm_bonus（提煉重複確認加權）。
+        2. 新事實與既有事實字面高度相似時，再比對兩者的否定極性：
+           - 極性相同 → 視為重複確認，hits += reaffirm_bonus。
+           - 極性相反 → 視為矛盾，以新事實**取代**舊事實（熱度歸 1，不加權）。
         3. 若為全新事實，追加至末尾。
         """
         cur_facts = MemoryManager.normalize_facts(current_facts_raw)
@@ -211,16 +295,34 @@ class MemoryManager:
         merged_facts = list(filtered_cur_facts)
 
         for new_f in incoming_clean:
-            new_f_lower = new_f.lower()
-            # 尋找是否已存在相同或高度相似的事實
+            # 以「去掉否定詞後的主題」配對，讓極性相反的同主題事實也能互相認得
+            new_key = MemoryManager.topic_key(new_f)
             matched_fact = next(
-                (f for f in merged_facts if f["text"].lower() == new_f_lower or new_f_lower in f["text"].lower() or f["text"].lower() in new_f_lower),
+                (
+                    f for f in merged_facts
+                    if MemoryManager._is_same_topic(MemoryManager.topic_key(f["text"]), new_key)
+                ),
                 None
             )
+
             if matched_fact:
-                # 提煉重複確認加權 hits += reaffirm_bonus
-                matched_fact["hits"] = matched_fact.get("hits", 1) + reaffirm_bonus
-                matched_fact["last_used_at"] = now
+                # 字面相似時，再比對否定極性以區分「重複確認」與「推翻更正」
+                if MemoryManager.has_negation(matched_fact["text"]) != MemoryManager.has_negation(new_f):
+                    # 極性相反 → 新事實推翻舊事實，就地取代（保留原本的排序位置）
+                    logger.info(
+                        f"✏️ [事實更正] 偵測到否定推翻，以新事實取代舊事實："
+                        f"{matched_fact['text']!r} -> {new_f!r}"
+                    )
+                    merged_facts[merged_facts.index(matched_fact)] = {
+                        "text": new_f,
+                        "hits": 1,
+                        "created_at": now,
+                        "last_used_at": now
+                    }
+                else:
+                    # 極性相同 → 提煉重複確認加權 hits += reaffirm_bonus
+                    matched_fact["hits"] = matched_fact.get("hits", 1) + reaffirm_bonus
+                    matched_fact["last_used_at"] = now
             else:
                 merged_facts.append({
                     "text": new_f,
@@ -510,23 +612,93 @@ class MemoryManager:
                     res[str(data["user_id"])] = data
                 return res
 
+    # 已回報過的同名暱稱，避免每則訊息都重複警告（僅在碰撞名單變動時才輸出）
+    _reported_ambiguous_names: Set[str] = set()
+
     @staticmethod
     async def get_known_users_map() -> Dict[str, str]:
-        """取得所有已知用戶的名稱小寫與 user_id 映射表"""
+        """
+        取得「暱稱小寫 → user_id」映射表，**僅包含唯一對應的暱稱**。
+
+        若同一個暱稱對應到多位使用者（Discord 允許重複顯示名稱，或有人改名撞到別人
+        的名字），整組排除而非任選一個保留。原本的寫法是後者覆蓋前者，而 SELECT 沒有
+        ORDER BY，留下哪一筆其實是不確定的——同一句話在不同時候可能命中不同的人。
+
+        排除後行為變成確定性的：要嘛找對人，要嘛找不到，不會找錯人。同名者仍可透過
+        Discord 原生 @提及被精準識別（見 resolve_mentioned_user_ids 的維度 A）。
+        """
         async with get_db_connection() as db:
             async with db.execute("SELECT user_id, user_name FROM user_profiles") as cursor:
                 rows = await cursor.fetchall()
-                name_map = {}
-                for r in rows:
-                    uname = str(r["user_name"]).strip().lower()
-                    if uname:
-                        name_map[uname] = str(r["user_id"])
-                return name_map
+
+        name_to_uids: Dict[str, Set[str]] = {}
+        for r in rows:
+            uname = str(r["user_name"]).strip().lower()
+            if uname:
+                name_to_uids.setdefault(uname, set()).add(str(r["user_id"]))
+
+        unique_map = {
+            uname: next(iter(uids))
+            for uname, uids in name_to_uids.items()
+            if len(uids) == 1
+        }
+
+        ambiguous = {uname for uname, uids in name_to_uids.items() if len(uids) > 1}
+        if ambiguous:
+            newly_seen = ambiguous - MemoryManager._reported_ambiguous_names
+            if newly_seen:
+                MemoryManager._reported_ambiguous_names |= newly_seen
+                logger.warning(
+                    f"⚠️ [暱稱同名碰撞] 以下暱稱對應到多位使用者，已停用其名稱比對以免認錯人："
+                    f"{sorted(newly_seen)}。這些使用者仍可透過 @提及被正確識別。"
+                )
+
+        return unique_map
+
+    @staticmethod
+    def is_matchable_name(uname: str) -> bool:
+        """
+        判斷一個暱稱是否適合拿來做「文字比對找人」。
+
+        排除掉誤命中率過高、不具鑑別度的名稱：
+        - 少於 2 個字：幾乎必然出現在任意訊息中。
+        - 落在停用詞清單內（如「今天」「可以」）：每句話都可能命中。
+        - 純 ASCII 且少於 3 字（如 "ab"）：極易成為其他英文單字的一部分。
+
+        被排除的名稱仍可透過 Discord 原生 @提及被精準識別，不會完全找不到人。
+        """
+        if not uname or len(uname) < 2:
+            return False
+        if uname in STOPWORDS:
+            return False
+        if uname.isascii() and len(uname) < 3:
+            return False
+        return True
+
+    @staticmethod
+    def name_appears_in(uname: str, content_lower: str) -> bool:
+        """
+        判斷暱稱是否出現在文本中。
+
+        英數暱稱有明確的詞邊界可用，因此以邊界比對避免 "test" 命中 "latest"、
+        "contest" 這類子字串誤判。
+
+        中文暱稱沒有詞邊界可依循，只能維持子字串比對——「小美」仍會命中「小美食」。
+        這是中文分詞的固有限制，在不引入分詞詞典的前提下無法可靠解決，因此刻意
+        不加啟發式規則硬猜（誤殺「桶子今天…」這類正常命中的代價更高）。
+        """
+        if not uname:
+            return False
+        if uname.isascii():
+            pattern = rf'(?<![a-z0-9_]){re.escape(uname)}(?![a-z0-9_])'
+            return re.search(pattern, content_lower) is not None
+        return uname in content_lower
 
     @staticmethod
     async def resolve_mentioned_user_ids(
         content: str,
-        exclude_uids: Optional[Set[str]] = None
+        exclude_uids: Optional[Set[str]] = None,
+        explicit_mentions: Optional[List[Dict[str, str]]] = None
     ) -> List[str]:
         """
         從文本解析出「被談到的人」的 user_id：維度 A（Discord @提及）＋ 維度 B（暱稱文字比對）。
@@ -534,11 +706,26 @@ class MemoryManager:
         回覆端的畫像檢索與提煉端的白名單共用此函式，確保兩邊對「誰算是參與了這段對話」
         的定義一致。先前兩處各自實作，導致監聽頻道的提煉白名單只認得有發言的人，
         被提及但沒發言者的特徵會被白名單拒絕寫入（跨使用者歸屬失效）。
+
+        explicit_mentions：由呼叫端從 `discord.Message.mentions` 取得的權威提及清單，
+        格式為 [{"user_id": ..., "user_name": ...}]。**這是維度 A 的正確來源**——訊息
+        內容存的是 `clean_content`，Discord 已把 `<@123>` 轉寫成 `@顯示名稱`，因此對內容
+        做 `<@!?(\\d+)>` 正則永遠不會命中。正則僅保留為 fallback，處理少數確實含原始
+        標記的輸入（例如使用者在 Slash 指令參數中自行打出的提及語法）。
+
+        回傳順序即優先序：@提及最精準排最前，名稱命中則以較長（較具鑑別度）者優先，
+        讓上層截斷配額時保留較可信的人選。
         """
         excluded = {str(u) for u in (exclude_uids or set())}
         found: List[str] = []
 
-        # 維度 A：Discord 原生 @提及
+        # 維度 A-1：Discord 權威提及清單（正確來源）
+        for item in (explicit_mentions or []):
+            mid = str(item.get("user_id", "")).strip()
+            if mid and mid not in excluded and mid not in found:
+                found.append(mid)
+
+        # 維度 A-2：原始 <@id> 標記（fallback，僅少數輸入會帶有）
         for mid in re.findall(r'<@!?(\d+)>', content or ""):
             if mid not in excluded and mid not in found:
                 found.append(mid)
@@ -546,10 +733,25 @@ class MemoryManager:
         # 維度 B：名稱文字比對
         known_name_map = await MemoryManager.get_known_users_map()
         content_lower = (content or "").lower()
+
+        matched: List[Tuple[str, str]] = []  # (暱稱, user_id)
         for uname, uid in known_name_map.items():
-            if uid not in excluded and uid not in found:
-                if len(uname) >= 2 and uname in content_lower:
-                    found.append(uid)
+            if uid in excluded or uid in found:
+                continue
+            if MemoryManager.is_matchable_name(uname) and MemoryManager.name_appears_in(uname, content_lower):
+                matched.append((uname, uid))
+
+        # 若某個命中的暱稱是另一個命中暱稱的子字串（例如「小美」與「小美美」同時命中
+        # 「小美美」），只保留較長者，避免把短名稱的主人一起誤拉進來。
+        filtered = [
+            (uname, uid) for uname, uid in matched
+            if not any(other != uname and uname in other for other, _ in matched)
+        ]
+
+        # 較長的暱稱鑑別度較高，排在前面
+        for uname, uid in sorted(filtered, key=lambda x: len(x[0]), reverse=True):
+            if uid not in found:
+                found.append(uid)
 
         return found
 
@@ -558,14 +760,17 @@ class MemoryManager:
         current_user_id: str,
         content: str,
         short_term_history: Optional[List[Dict[str, Any]]] = None,
-        max_others: int = 4
+        max_others: int = 4,
+        explicit_mentions: Optional[List[Dict[str, str]]] = None
     ) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
         """多人多維畫像檢索解析器"""
         current_profile = await MemoryManager.get_user_profile(current_user_id)
 
         # 維度 A + B（與提煉端白名單共用同一份解析邏輯）
         target_other_uids: List[str] = await MemoryManager.resolve_mentioned_user_ids(
-            content, exclude_uids={str(current_user_id)}
+            content,
+            exclude_uids={str(current_user_id)},
+            explicit_mentions=explicit_mentions
         )
 
         # 維度 C：近期頻道發言者

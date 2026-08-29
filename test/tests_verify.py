@@ -1,6 +1,7 @@
 import unittest
 import asyncio
 import os
+import re
 import sys
 import time
 import json
@@ -1003,6 +1004,201 @@ class TestFriendBotFeatures(unittest.IsolatedAsyncioTestCase):
 
         p = await MemoryManager.get_user_profile("1001")
         self.assertIn("撿漏成功", get_fact_texts(p["facts"]))
+
+    # ==================== 20. 暱稱文字比對的誤命中防護 (P2-1) ====================
+    def test_is_matchable_name_filters_low_signal_names(self):
+        """過短、停用詞、過短英數暱稱不應拿來做文字比對"""
+        self.assertTrue(MemoryManager.is_matchable_name("桶子"))
+        self.assertTrue(MemoryManager.is_matchable_name("真由理"))
+        self.assertTrue(MemoryManager.is_matchable_name("daru"))
+
+        self.assertFalse(MemoryManager.is_matchable_name("桶"))      # 少於 2 字
+        self.assertFalse(MemoryManager.is_matchable_name("今天"))    # 停用詞
+        self.assertFalse(MemoryManager.is_matchable_name("可以"))    # 停用詞
+        self.assertFalse(MemoryManager.is_matchable_name("ab"))      # 純 ASCII 過短
+
+    def test_ascii_name_matching_respects_word_boundary(self):
+        """英數暱稱需以詞邊界比對，避免成為其他單字的一部分"""
+        # 誤命中案例（修復前會全部命中）
+        self.assertFalse(MemoryManager.name_appears_in("test", "the latest news"))
+        self.assertFalse(MemoryManager.name_appears_in("test", "a contest today"))
+        self.assertFalse(MemoryManager.name_appears_in("daru", "darush is here"))
+
+        # 正常命中仍須成立
+        self.assertTrue(MemoryManager.name_appears_in("test", "test 你好"))
+        self.assertTrue(MemoryManager.name_appears_in("test", "hi test!"))
+        self.assertTrue(MemoryManager.name_appears_in("daru", "問一下 daru 好了"))
+
+    def test_chinese_name_matching_unchanged(self):
+        """中文暱稱的命中範圍不得因本次收緊而縮小"""
+        self.assertTrue(MemoryManager.name_appears_in("桶子", "桶子今天又通宵"))
+        self.assertTrue(MemoryManager.name_appears_in("桶子", "我覺得桶子很誇張"))
+        self.assertTrue(MemoryManager.name_appears_in("真由理", "剛剛遇到真由理"))
+
+        # 已知限制：中文無詞邊界，短暱稱仍會命中較長的詞。
+        # 此處刻意斷言現況，若日後引入分詞而改變行為，這個測試會提醒需一併更新文件。
+        self.assertTrue(MemoryManager.name_appears_in("小美", "今天的小美食好吃"))
+
+    async def test_longest_matching_name_wins(self):
+        """暱稱互為子字串時只保留較長者，短名稱的主人不應被一起拉進來"""
+        await MemoryManager.update_user_profile("5001", "小美", facts=[])
+        await MemoryManager.update_user_profile("5002", "小美美", facts=[])
+
+        found = await MemoryManager.resolve_mentioned_user_ids("小美美今天心情很好")
+        self.assertEqual(found, ["5002"])
+
+    async def test_stopword_named_user_not_matched_by_every_message(self):
+        """暱稱恰為停用詞的使用者，不應因任意訊息含該詞就被拉進上下文"""
+        await MemoryManager.update_user_profile("5003", "今天", facts=[])
+        await MemoryManager.update_user_profile("5004", "桶子", facts=[])
+
+        found = await MemoryManager.resolve_mentioned_user_ids("今天桶子有來嗎")
+        self.assertEqual(found, ["5004"])
+
+    async def test_mention_priority_ordering(self):
+        """@提及排在名稱命中之前，名稱命中則長者優先"""
+        await MemoryManager.update_user_profile("5005", "桶子", facts=[])
+        await MemoryManager.update_user_profile("5006", "真由理", facts=[])
+        await MemoryManager.update_user_profile("5007", "岡部", facts=[])
+
+        found = await MemoryManager.resolve_mentioned_user_ids(
+            "<@5007> 你看桶子跟真由理又在鬧了"
+        )
+        self.assertEqual(found[0], "5007")            # @提及最優先
+        self.assertEqual(found[1], "5006")            # 「真由理」比「桶子」長
+
+    # ==================== 21. 暱稱同名碰撞與權威 @提及 (P1-2) ====================
+    async def test_ambiguous_nickname_is_excluded_not_guessed(self):
+        """同名暱稱對應多人時整組排除，不可任選一個保留"""
+        await MemoryManager.update_user_profile("6001", "小明", facts=[])
+        await MemoryManager.update_user_profile("6002", "小明", facts=[])   # 同名
+        await MemoryManager.update_user_profile("6003", "桶子", facts=[])
+
+        name_map = await MemoryManager.get_known_users_map()
+        self.assertNotIn("小明", name_map)      # 同名者整組排除
+        self.assertEqual(name_map.get("桶子"), "6003")
+
+        # 名稱比對不得認錯人：兩位小明都不應被拉進來
+        found = await MemoryManager.resolve_mentioned_user_ids("小明今天有來嗎")
+        self.assertEqual(found, [])
+
+    async def test_ambiguous_nickname_still_reachable_via_mention(self):
+        """同名者仍可透過 Discord 權威 @提及被精準識別（降級才算安全）"""
+        await MemoryManager.update_user_profile("6001", "小明", facts=[])
+        await MemoryManager.update_user_profile("6002", "小明", facts=[])
+
+        found = await MemoryManager.resolve_mentioned_user_ids(
+            "@小明 今天有來嗎",
+            explicit_mentions=[{"user_id": "6002", "user_name": "小明"}]
+        )
+        self.assertEqual(found, ["6002"])       # 精準命中那一位，不是猜的
+
+    async def test_explicit_mentions_are_the_working_path(self):
+        """
+        維度 A 的正確來源是 message.mentions，而非對內容做正則。
+        discord.py 的 clean_content 會把 <@id> 轉寫成 @顯示名稱，正則永遠不會命中。
+        """
+        await MemoryManager.update_user_profile("6004", "真由理", facts=[])
+
+        # 模擬 clean_content：原始標記已被 Discord 轉寫掉
+        clean = "@真由理 你在嗎"
+        self.assertEqual(re.findall(r'<@!?(\d+)>', clean), [])   # 正則確實抓不到
+
+        found = await MemoryManager.resolve_mentioned_user_ids(
+            clean, explicit_mentions=[{"user_id": "6004", "user_name": "真由理"}]
+        )
+        self.assertEqual(found, ["6004"])
+
+        # fallback 仍需可用：確實含原始標記的輸入（如 Slash 指令參數）
+        found_raw = await MemoryManager.resolve_mentioned_user_ids("<@6004> 你在嗎")
+        self.assertEqual(found_raw, ["6004"])
+
+    async def test_mentioned_user_without_profile_gets_authoritative_name(self):
+        """首次被 @提及而尚無畫像者，建檔名稱須來自 Discord 而非模型輸出"""
+        await MemoryManager.update_user_profile("6005", "岡部", facts=[])
+        # 6006 尚無畫像
+        await MemoryManager.save_message("p1", "777", "6005", "岡部", "@新人 你好啊")
+
+        ex = self._make_extractor([
+            {"user_id": "6006", "user_name": "模型亂取的名字", "facts": ["剛加入群組"],
+             "remove_facts": [], "interaction_notes": "", "favorability_delta": 0},
+        ])
+        await ex.extract_dialogue([{
+            "message_id": "p1", "channel_id": "777", "user_id": "6005",
+            "user_name": "岡部", "content": "@新人 你好啊",
+            "mentions": [{"user_id": "6006", "user_name": "新人"}]
+        }], "777")
+
+        p = await MemoryManager.get_user_profile("6006")
+        self.assertIsNotNone(p)
+        self.assertEqual(p["user_name"], "新人")            # 不是「模型亂取的名字」
+        self.assertIn("剛加入群組", get_fact_texts(p["facts"]))
+
+    # ==================== 22. 事實否定推翻與更正 (P1-1) ====================
+    def test_has_negation_is_conservative(self):
+        """否定偵測需寧可漏判也不誤判：誤判會刪掉仍然成立的事實"""
+        self.assertTrue(MemoryManager.has_negation("已經不喜歡台北了"))
+        self.assertTrue(MemoryManager.has_negation("沒有養寵物"))
+        self.assertTrue(MemoryManager.has_negation("does not like coffee"))
+
+        # 含「不」卻非否定的常見詞不得誤判
+        self.assertFalse(MemoryManager.has_negation("覺得台北不錯"))
+        self.assertFalse(MemoryManager.has_negation("差不多每天熬夜"))
+        # 「非常」「未來」「無聊」刻意不列入否定標記，避免大量誤判
+        self.assertFalse(MemoryManager.has_negation("非常喜歡台北"))
+        self.assertFalse(MemoryManager.has_negation("很期待未來的旅行"))
+        self.assertFalse(MemoryManager.has_negation("覺得很無聊"))
+
+    def test_negated_fact_replaces_instead_of_reaffirming(self):
+        """核心迴歸：否定句不得被誤判為「重複確認」而替錯誤事實加權"""
+        old = [{"text": "喜歡台北", "hits": 1, "created_at": 0, "last_used_at": 0}]
+        merged = MemoryManager.merge_facts(old, ["已經不喜歡台北了"], [])
+
+        texts = get_fact_texts(merged)
+        self.assertEqual(texts, ["已經不喜歡台北了"])   # 舊事實被取代
+        self.assertEqual(merged[0]["hits"], 1)          # 更正不加權（修復前會變成 4）
+
+    def test_correction_works_in_both_directions(self):
+        """負 -> 正的更正同樣要生效（否定詞會破壞子字串關係，需靠主題比對）"""
+        old = [{"text": "不喜歡吃辣", "hits": 5, "created_at": 0, "last_used_at": 0}]
+        merged = MemoryManager.merge_facts(old, ["現在喜歡吃辣了"], [])
+
+        self.assertEqual(get_fact_texts(merged), ["現在喜歡吃辣了"])
+        self.assertEqual(merged[0]["hits"], 1)
+
+    def test_same_polarity_still_reaffirms(self):
+        """極性相同仍應維持原本的重複確認加權行為"""
+        old = [{"text": "不熬夜", "hits": 1, "created_at": 0, "last_used_at": 0}]
+        merged = MemoryManager.merge_facts(old, ["已經不熬夜了"], [])
+        self.assertEqual(get_fact_texts(merged), ["不熬夜"])
+        self.assertEqual(merged[0]["hits"], 4)
+
+        # 「非常喜歡」是加強語氣而非否定，必須加權而不是取代
+        old2 = [{"text": "喜歡台北", "hits": 1, "created_at": 0, "last_used_at": 0}]
+        merged2 = MemoryManager.merge_facts(old2, ["非常喜歡台北"], [])
+        self.assertEqual(get_fact_texts(merged2), ["喜歡台北"])
+        self.assertEqual(merged2[0]["hits"], 4)
+
+    def test_unrelated_facts_are_not_merged(self):
+        """不同主題的事實各自保留；剝除否定詞後的短字串不得到處誤配"""
+        old = [{"text": "喜歡台北", "hits": 1, "created_at": 0, "last_used_at": 0}]
+        merged = MemoryManager.merge_facts(old, ["喜歡吃拉麵"], [])
+        self.assertEqual(sorted(get_fact_texts(merged)), sorted(["喜歡台北", "喜歡吃拉麵"]))
+
+        # 「不去」剝除後只剩「去」，不可誤配到「去日本玩」
+        short = [{"text": "不去", "hits": 1, "created_at": 0, "last_used_at": 0}]
+        merged_short = MemoryManager.merge_facts(short, ["去日本玩"], [])
+        self.assertEqual(len(merged_short), 2)
+
+    def test_no_self_reinforcing_loop_on_repeated_denial(self):
+        """使用者反覆否認同一件事，不得讓錯誤事實的熱度持續累積"""
+        facts = [{"text": "喜歡台北", "hits": 1, "created_at": 0, "last_used_at": 0}]
+        for _ in range(3):
+            facts = MemoryManager.merge_facts(facts, ["其實不喜歡台北"], [])
+
+        self.assertEqual(get_fact_texts(facts), ["其實不喜歡台北"])
+        # 第一次取代後，後兩次屬同極性的重複確認：1 -> 4 -> 7
+        self.assertEqual(facts[0]["hits"], 7)
 
 
 if __name__ == "__main__":

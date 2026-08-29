@@ -142,7 +142,11 @@ class FriendBotClient(
                     "user_name": message.author.display_name,
                     "content": message.clean_content,
                     "has_image": bool(message.attachments),
-                    "timestamp": int(message.created_at.timestamp())
+                    "timestamp": int(message.created_at.timestamp()),
+                    "mentions": [
+                        {"user_id": str(u.id), "user_name": u.display_name}
+                        for u in message.mentions
+                    ]
                 }
             )
             return
@@ -199,12 +203,20 @@ class FriendBotClient(
             # 組合本批訊息文本供多用戶畫像檢索
             combined_content = " \n ".join([m.clean_content.strip() for m in messages if m.clean_content.strip()])
 
+            # Discord 權威 @提及清單。訊息內容存的是 clean_content（<@123> 已被 Discord
+            # 轉寫成 @顯示名稱），因此必須從 message.mentions 取得，不能對內容做正則。
+            explicit_mentions = [
+                {"user_id": str(u.id), "user_name": u.display_name}
+                for m in messages for u in m.mentions
+            ]
+
             # 多人記憶檢索 (A + B + C 混合方案)
             current_user_profile, other_user_profiles = await MemoryManager.resolve_multi_user_profiles(
                 current_user_id=latest_user_id,
                 content=combined_content,
                 short_term_history=short_term,
-                max_others=4
+                max_others=4,
+                explicit_mentions=explicit_mentions
             )
 
             # 三軌混合事實檢索 (Heat + RAG + Recent)
@@ -368,7 +380,12 @@ class FriendBotClient(
                         "user_name": m.author.display_name,
                         "content": m.clean_content,
                         "has_image": bool(m.attachments),
-                        "timestamp": int(m.created_at.timestamp())
+                        "timestamp": int(m.created_at.timestamp()),
+                        # 權威 @提及（含顯示名稱），供提煉端解析白名單與權威名稱
+                        "mentions": [
+                            {"user_id": str(u.id), "user_name": u.display_name}
+                            for u in m.mentions
+                        ]
                     }
                     for m in messages
                 ]
