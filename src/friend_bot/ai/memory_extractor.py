@@ -25,8 +25,19 @@ class MemoryExtractor:
         self._debounce_tasks: Dict[str, asyncio.Task] = {}
         self._lock = asyncio.Lock()
 
-    async def _safe_apply_updates(self, updates: List[Dict[str, Any]], default_user_name: str = "") -> None:
-        """核心安全合併管線：歷史事實永久保護 + remove_facts 精準更正 + 提煉重複加權 + 隱密好感度計算與印象演進"""
+    async def _safe_apply_updates(
+        self,
+        updates: List[Dict[str, Any]],
+        default_user_name: str = "",
+        allowed_uids: Optional[set] = None
+    ) -> None:
+        """
+        核心安全合併管線：歷史事實永久保護 + remove_facts 精準更正 + 提煉重複加權 + 隱密好感度計算與印象演進。
+
+        allowed_uids：本次提煉實際帶入模型 Prompt 上下文的使用者 ID 白名單（發言者本人 + 對話中在場/提及的
+        其他群友）。模型輸出的 user_id 若不在此白名單內（無論是明確給出、或透過姓名比對補全），一律拒絕套用，
+        避免惡意使用者透過訊息內容注入指令，操控「不在本次對話中」的第三方使用者的好感度或事實。
+        """
         if not isinstance(updates, list) or not updates:
             return
 
@@ -48,73 +59,83 @@ class MemoryExtractor:
             if not target_uid:
                 continue
 
-            # 取得目前已有的畫像
-            current_p = await MemoryManager.get_user_profile(target_uid)
-            cur_facts = current_p.get("facts", []) if current_p else []
-            cur_notes = current_p.get("interaction_notes", "") if current_p else ""
-            cur_fav = current_p.get("favorability", DEFAULT_FAVORABILITY) if current_p else DEFAULT_FAVORABILITY
-            cur_tier = current_p.get("relationship_tier", "familiar") if current_p else "familiar"
-            cur_daily_gain = current_p.get("daily_favorability_gain", 0) if current_p else 0
-            cur_gain_date = current_p.get("last_gain_date", "") if current_p else ""
+            # 【白名單校驗】拒絕套用任何不在本次對話上下文中的使用者 ID（見上方 docstring）
+            if allowed_uids is not None and target_uid not in allowed_uids:
+                logger.warning(
+                    f"⚠️ [畫像更新已拒絕] 模型輸出的 user_id [{target_uid} / {target_name}] "
+                    f"不在本次對話上下文白名單內，可能為幻覺或提示詞注入，已略過此筆更新"
+                )
+                continue
 
-            # 【安全更正與增量合併】：透過 MemoryManager.merge_facts 處理更正、剔除與 hits 加權
-            merged_facts = MemoryManager.merge_facts(
-                current_facts_raw=cur_facts,
-                incoming_facts_raw=incoming_facts_raw,
-                remove_facts_raw=remove_facts_raw
-            )
-
-            # 互動印象保護
-            merged_notes = str(notes).strip() if (notes and str(notes).strip()) else cur_notes
-
-            # 【好感度與關係階級計算】
             try:
                 delta_int = int(raw_fav_delta)
             except (ValueError, TypeError):
                 delta_int = 0
 
-            if ENABLE_FAVORABILITY and delta_int != 0:
-                new_fav, new_tier, new_daily_gain, today_str = MemoryManager.calculate_favorability_update(
-                    current_score=cur_fav,
-                    current_daily_gain=cur_daily_gain,
-                    last_gain_date=cur_gain_date,
-                    delta=delta_int,
-                    gain_limit=DAILY_GAIN_LIMIT,
-                    loss_limit=DAILY_LOSS_LIMIT
+            def _mutator(current_p: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+                cur_facts = current_p.get("facts", []) if current_p else []
+                cur_notes = current_p.get("interaction_notes", "") if current_p else ""
+                cur_fav = current_p.get("favorability", DEFAULT_FAVORABILITY) if current_p else DEFAULT_FAVORABILITY
+                cur_tier = current_p.get("relationship_tier", "familiar") if current_p else "familiar"
+                cur_daily_gain = current_p.get("daily_favorability_gain", 0) if current_p else 0
+                cur_gain_date = current_p.get("last_gain_date", "") if current_p else ""
+
+                # 【安全更正與增量合併】：透過 MemoryManager.merge_facts 處理更正、剔除與 hits 加權
+                merged_facts = MemoryManager.merge_facts(
+                    current_facts_raw=cur_facts,
+                    incoming_facts_raw=incoming_facts_raw,
+                    remove_facts_raw=remove_facts_raw
                 )
-            else:
-                new_fav = cur_fav
-                new_tier = cur_tier
-                new_daily_gain = cur_daily_gain
-                today_str = cur_gain_date
 
-            # 判斷是否有實質變更需寫回資料庫
-            has_changes = (
-                merged_facts != cur_facts or
-                merged_notes != cur_notes or
-                new_fav != cur_fav or
-                new_tier != cur_tier or
-                new_daily_gain != cur_daily_gain or
-                current_p is None
-            )
+                # 互動印象保護
+                merged_notes = str(notes).strip() if (notes and str(notes).strip()) else cur_notes
 
-            if has_changes:
+                # 【好感度與關係階級計算】
+                if ENABLE_FAVORABILITY and delta_int != 0:
+                    new_fav, new_tier, new_daily_gain, today_str = MemoryManager.calculate_favorability_update(
+                        current_score=cur_fav,
+                        current_daily_gain=cur_daily_gain,
+                        last_gain_date=cur_gain_date,
+                        delta=delta_int,
+                        gain_limit=DAILY_GAIN_LIMIT,
+                        loss_limit=DAILY_LOSS_LIMIT
+                    )
+                else:
+                    new_fav = cur_fav
+                    new_tier = cur_tier
+                    new_daily_gain = cur_daily_gain
+                    today_str = cur_gain_date
+
+                # 判斷是否有實質變更需寫回資料庫
+                has_changes = (
+                    merged_facts != cur_facts or
+                    merged_notes != cur_notes or
+                    new_fav != cur_fav or
+                    new_tier != cur_tier or
+                    new_daily_gain != cur_daily_gain or
+                    current_p is None
+                )
+                if not has_changes:
+                    return None
+
                 final_user_name = target_name or (current_p.get("user_name") if current_p else default_user_name or target_name)
-                await MemoryManager.update_user_profile(
-                    user_id=target_uid,
-                    user_name=final_user_name,
-                    facts=merged_facts,
-                    interaction_notes=merged_notes,
-                    favorability=new_fav,
-                    relationship_tier=new_tier,
-                    daily_favorability_gain=new_daily_gain,
-                    last_gain_date=today_str
-                )
                 logger.info(
                     f"🧠 [畫像/好感更新] 用戶 [{final_user_name} ({target_uid})] "
                     f"好感度: {cur_fav} -> {new_fav} ({new_tier}), 今日增量: {new_daily_gain}/{DAILY_GAIN_LIMIT}, "
                     f"facts={len(merged_facts)} 條"
                 )
+                return {
+                    "user_name": final_user_name,
+                    "facts": merged_facts,
+                    "interaction_notes": merged_notes,
+                    "favorability": new_fav,
+                    "relationship_tier": new_tier,
+                    "daily_favorability_gain": new_daily_gain,
+                    "last_gain_date": today_str
+                }
+
+            # 以每使用者鎖包住「讀取 -> 合併 -> 寫回」，避免與其他並行背景任務互相覆寫 (lost update)
+            await MemoryManager.apply_profile_update(target_uid, _mutator)
 
     async def extract_and_update(
         self,
@@ -132,7 +153,7 @@ class MemoryExtractor:
             speaker_info = {
                 "user_id": str(user_id),
                 "user_name": user_name,
-                "facts": [f["text"] for f in speaker_profile.get("facts", [])] if speaker_profile else [],
+                "facts": MemoryManager.to_fact_texts(speaker_profile.get("facts", [])) if speaker_profile else [],
                 "interaction_notes": speaker_profile.get("interaction_notes", "") if speaker_profile else "",
                 "favorability": speaker_profile.get("favorability", DEFAULT_FAVORABILITY) if speaker_profile else DEFAULT_FAVORABILITY
             }
@@ -141,8 +162,7 @@ class MemoryExtractor:
             if other_users:
                 for u in other_users:
                     if str(u.get("user_id")) != str(user_id):
-                        u_facts = u.get("facts", [])
-                        fact_strs = [f["text"] if isinstance(f, dict) else str(f) for f in u_facts]
+                        fact_strs = MemoryManager.to_fact_texts(u.get("facts", []))
                         o_copy = dict(u)
                         o_copy["facts"] = fact_strs
                         other_users_info.append(o_copy)
@@ -169,7 +189,8 @@ class MemoryExtractor:
 
             data = json.loads(cleaned_json_str)
             updates = data.get("updates", [])
-            await self._safe_apply_updates(updates, default_user_name=user_name)
+            allowed_uids = {str(user_id)} | {str(u.get("user_id")) for u in other_users_info if u.get("user_id")}
+            await self._safe_apply_updates(updates, default_user_name=user_name, allowed_uids=allowed_uids)
 
         except Exception as e:
             logger.warning(f"單次記憶提煉與好感度評估失敗 (User: {user_name}): {e}")
@@ -219,7 +240,7 @@ class MemoryExtractor:
             known_profiles = []
             for p in profiles_dict.values():
                 p_copy = dict(p)
-                p_copy["facts"] = [f["text"] if isinstance(f, dict) else str(f) for f in p.get("facts", [])]
+                p_copy["facts"] = MemoryManager.to_fact_texts(p.get("facts", []))
                 known_profiles.append(p_copy)
 
             prompt = build_batch_dialogue_extraction_prompt(
@@ -243,7 +264,7 @@ class MemoryExtractor:
 
             data = json.loads(cleaned_json_str)
             updates = data.get("updates", [])
-            await self._safe_apply_updates(updates)
+            await self._safe_apply_updates(updates, allowed_uids=set(user_ids))
 
             msg_ids = [str(m.get("message_id")) for m in messages if m.get("message_id")]
             await MemoryManager.mark_messages_extracted(msg_ids)

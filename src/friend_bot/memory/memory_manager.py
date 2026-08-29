@@ -1,8 +1,9 @@
+import asyncio
 import json
 import re
 import time
 from datetime import datetime
-from typing import List, Dict, Any, Optional, Tuple, Set
+from typing import List, Dict, Any, Optional, Tuple, Set, Callable
 from .db import get_db_connection
 from src.friend_bot.core.config import (
     SHORT_TERM_HISTORY_LIMIT,
@@ -35,6 +36,45 @@ STOPWORDS: Set[str] = {
 
 class MemoryManager:
     """三層記憶管理器：負責儲存與檢索短期對話、長期畫像、好感度與跨頻道歷史回憶"""
+
+    # 每位使用者專屬的非同步鎖，序列化「讀取 -> 合併 -> 寫回」流程，避免背景任務併發覆寫 (lost update)
+    _user_locks: Dict[str, asyncio.Lock] = {}
+    _locks_guard: asyncio.Lock = asyncio.Lock()
+
+    @staticmethod
+    async def _get_user_lock(user_id: str) -> asyncio.Lock:
+        """取得（必要時建立）特定使用者專屬的鎖"""
+        uid = str(user_id)
+        lock = MemoryManager._user_locks.get(uid)
+        if lock is None:
+            async with MemoryManager._locks_guard:
+                lock = MemoryManager._user_locks.get(uid)
+                if lock is None:
+                    lock = asyncio.Lock()
+                    MemoryManager._user_locks[uid] = lock
+        return lock
+
+    @staticmethod
+    async def apply_profile_update(
+        user_id: str,
+        mutator: Callable[[Optional[Dict[str, Any]]], Optional[Dict[str, Any]]]
+    ) -> None:
+        """
+        以每位使用者專屬鎖包住「讀取現有畫像 -> 計算變更 -> 寫回」的完整流程。
+
+        mutator 接收目前的 profile（可能為 None，代表尚無記錄），並回傳要傳給
+        update_user_profile 的關鍵字參數字典；若判斷無需變更，回傳 None 即可跳過寫入。
+        所有需要「讀後寫」使用者畫像的呼叫方都應透過此方法，避免多個並行背景任務
+        （JIT 提煉、RAG 命中加權、對話提煉等）同時讀到舊資料而互相覆蓋彼此的更新。
+        """
+        uid = str(user_id)
+        lock = await MemoryManager._get_user_lock(uid)
+        async with lock:
+            current = await MemoryManager.get_user_profile(uid)
+            update_kwargs = mutator(current)
+            if update_kwargs is None:
+                return
+            await MemoryManager.update_user_profile(user_id=uid, **update_kwargs)
 
     @staticmethod
     def compute_relationship_tier(score: int) -> str:
@@ -122,6 +162,13 @@ class MemoryManager:
                     "last_used_at": now
                 })
         return normalized
+
+    @staticmethod
+    def to_fact_texts(facts_raw: Any) -> List[str]:
+        """將任意格式（標準字典列表 / 舊格式純字串列表 / 混合格式）的 facts 統一轉為純文字字串列表"""
+        if not facts_raw:
+            return []
+        return [f["text"] if isinstance(f, dict) else str(f) for f in facts_raw]
 
     @staticmethod
     def merge_facts(
@@ -294,20 +341,22 @@ class MemoryManager:
         cooldown_seconds: int = FACTS_RAG_HIT_COOLDOWN_SECONDS,
         hit_bonus: int = FACTS_RAG_HIT_BONUS
     ) -> None:
-        """非同步記錄事實被 RAG 命中（帶冷卻時間防刷）"""
+        """非同步記錄事實被 RAG 命中（帶冷卻時間防刷，透過每使用者鎖序列化避免併發覆寫）"""
         if not user_id or not hit_texts:
             return
 
-        try:
-            profile = await MemoryManager.get_user_profile(str(user_id))
-            if not profile:
-                return
+        hit_set = {t.strip().lower() for t in hit_texts if t.strip()}
+        if not hit_set:
+            return
 
-            raw_facts = profile.get("facts", [])
-            normalized = MemoryManager.normalize_facts(raw_facts)
+        changed_flag = {"changed": False}
+
+        def _mutator(profile: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+            if not profile:
+                return None
+
+            normalized = MemoryManager.normalize_facts(profile.get("facts", []))
             now = int(time.time())
-            hit_set = {t.strip().lower() for t in hit_texts if t.strip()}
-            changed = False
 
             for f in normalized:
                 if f["text"].strip().lower() in hit_set:
@@ -315,19 +364,24 @@ class MemoryManager:
                     if now - last_used >= cooldown_seconds or f.get("hits", 0) == 0:
                         f["hits"] = f.get("hits", 0) + hit_bonus
                         f["last_used_at"] = now
-                        changed = True
+                        changed_flag["changed"] = True
 
-            if changed:
-                await MemoryManager.update_user_profile(
-                    user_id=str(user_id),
-                    user_name=profile.get("user_name", "用戶"),
-                    facts=normalized,
-                    interaction_notes=profile.get("interaction_notes", ""),
-                    favorability=profile.get("favorability"),
-                    relationship_tier=profile.get("relationship_tier"),
-                    daily_favorability_gain=profile.get("daily_favorability_gain"),
-                    last_gain_date=profile.get("last_gain_date")
-                )
+            if not changed_flag["changed"]:
+                return None
+
+            return {
+                "user_name": profile.get("user_name", "用戶"),
+                "facts": normalized,
+                "interaction_notes": profile.get("interaction_notes", ""),
+                "favorability": profile.get("favorability"),
+                "relationship_tier": profile.get("relationship_tier"),
+                "daily_favorability_gain": profile.get("daily_favorability_gain"),
+                "last_gain_date": profile.get("last_gain_date")
+            }
+
+        try:
+            await MemoryManager.apply_profile_update(str(user_id), _mutator)
+            if changed_flag["changed"]:
                 logger.debug(f"🔥 [事實 RAG 命中加權] 用戶 ID:{user_id} 命中事實: {hit_texts}")
         except Exception as e:
             logger.warning(f"記錄事實命中熱度失敗 (User: {user_id}): {e}")

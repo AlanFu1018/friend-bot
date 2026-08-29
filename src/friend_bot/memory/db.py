@@ -13,6 +13,9 @@ async def get_db_connection():
     db_file.parent.mkdir(parents=True, exist_ok=True)
     async with aiosqlite.connect(str(db_file)) as db:
         db.row_factory = aiosqlite.Row
+        # WAL 允許讀寫並行；busy_timeout 讓短暫鎖競爭自動重試而非直接拋出 "database is locked"
+        await db.execute("PRAGMA journal_mode=WAL;")
+        await db.execute("PRAGMA busy_timeout=5000;")
         yield db
 
 async def init_db():
