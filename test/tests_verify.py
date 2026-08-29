@@ -669,11 +669,12 @@ class TestFriendBotFeatures(unittest.IsolatedAsyncioTestCase):
         self.assertTrue("sad" in EmotionReplacer._kaomoji_map)
         self.assertTrue("depressed" in EmotionReplacer._kaomoji_map)
 
-        # 測試標籤替換
+        # 測試標籤替換（應以程式碼區塊 `...` 包裹）
         raw_text = "誰是助手啊！還有，我哪有開心？[emotion:tsundere]"
         replaced = EmotionReplacer.replace_emotion_tags(raw_text)
         self.assertNotIn("[emotion:tsundere]", replaced)
         self.assertIn("誰是助手啊！還有，我哪有開心？", replaced)
+        self.assertTrue("`" in replaced)
 
         # 測試別名映射 (如 [emotion:shy], [emotion:cry], [emotion:gloom])
         alias_text = "別看我啦……[emotion:shy] 嗚嗚……[emotion:cry] 好累喔[emotion:gloom]"
@@ -681,6 +682,7 @@ class TestFriendBotFeatures(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("[emotion:shy]", replaced_alias)
         self.assertNotIn("[emotion:cry]", replaced_alias)
         self.assertNotIn("[emotion:gloom]", replaced_alias)
+        self.assertTrue("`" in replaced_alias)
 
         # 測試多標籤替換
         multi_text = "真是中二。[emotion:sigh] 不過理論確實嚴謹。[emotion:proud]"
@@ -695,6 +697,7 @@ class TestFriendBotFeatures(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("[emotion:depressed]", replaced_sd)
         self.assertIn("怎麼會這樣……", replaced_sd)
         self.assertIn("實驗又失敗了……", replaced_sd)
+        self.assertTrue("`" in replaced_sd)
 
         # 測試防連續重複 (連續抽取 tsundere 兩次)
         k1 = EmotionReplacer.get_random_kaomoji("tsundere")

@@ -65,7 +65,7 @@ gemini:
   model: "gemini-3.1-flash-lite"
   
   # 溫度值 (0.0 ~ 2.0)：數值越高越隨機幽默，數值越低越精準嚴謹
-  temperature: 0.88
+  temperature: 0.87
   
   # 頻率/存在懲罰（注意：多數 Gemini 模型後端目前尚未啟用 Penalty，若設定非 0 且 API 報錯時系統會自動安全降級重試）
   frequency_penalty: 0.0
@@ -117,7 +117,7 @@ favorability:
   default_favorability: 30
 
   # 單一用戶「每日好感度增加上限」（防止洗頻刷分）
-  daily_gain_limit: 5
+  daily_gain_limit: 15
 
   # 單一用戶「每日好感度扣分上限」（避免因少數誤判過度扣分）
-  daily_loss_limit: 10
+  daily_loss_limit: 100

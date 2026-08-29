@@ -17,23 +17,23 @@ DEFAULT_KAOMOJI_MAP: Dict[str, List[str]] = {
     ],
     "shock": [
         "(；ﾟДﾟ)", "(((ﾟДﾟ)))", "( ﾟдﾟ)", "⊂⌒~⊃｡Д｡)⊃",
-        "(つд⊂)", "Σ(ﾟДﾟ；)", "(・_・;)", "(ﾟﾛﾟ;)", "(°Д°；)"
+        "(つд⊂)", "Σ(ﾟДﾟ；)", "(・_・;)", "(ﾟᗝﾟ;)", "(°Д°；)"
     ],
     "sigh": [
         "(；一_一)", "( ´Д｀)=3", "┐(´д｀)┌", "(눈_눈)",
         "(-_-;)", "(´ヘ｀；)", "(ー_ー)", "(￣_￣|||)"
     ],
     "proud": [
-        "(๑•̀ㅂ•́)و✧", "( ¯•ω•¯ )", "(`・ω・´)", "╭( ･ㅂ･)و ̑̑",
-        "(*￣ー￣)", "(｀・ω・´)ゞ", "(￣▽+￣*)"
+        "(๑•̀ㅂ•́)و✧", "( ¯•ω•¯ )", "(´・ω・´)", "╭( ･ㅂ･)و ̑̑",
+        "(*￣ー￣)", "(｀・ω・´)ゝ", "(￣▽+￣*)"
     ],
     "soft": [
-        "(´・ω・)ﾉ", "(｡･ω･｡)", "(*´ω｀*)", "(*´∀｀*)",
+        "(´・ω・`)ﾉ", "(｡･ω･｡)", "(*´ω｀*)", "(*´∀｀*)",
         "(´∀｀*)", "(´ω｀*)", "(*˘︶˘*)"
     ],
     "angry": [
-        "(╬ Ò ‸ Ó)", "(ノ｀Д´)ノ", "(`Д´#)", "ヽ(`Д´)ﾉ",
-        "(｀ε´)", "(-`ェ´-)", "(`皿´)"
+        "(╬ Ò ‸ Ó)", "(ノ´Д´)ノ", "(´Д´#)", "ヽ(´Д´)ﾉ",
+        "(｀ε´)", "(-´ェ´-)", "(´皿´)"
     ],
     "thinking": [
         "(・ω・)？", "(・-・)？", "(´･ω･`)？", "(・へ・)", "( ˘•ω•˘ )"
@@ -53,7 +53,7 @@ DEFAULT_KAOMOJI_MAP: Dict[str, List[str]] = {
 class EmotionReplacer:
     """
     情緒標籤渲染器 (Tag & Replace Engine)
-    將模型輸出的 [emotion:類別] 自動替換為對應情緒庫的日系/2ch顏文字，
+    將模型輸出的 [emotion:類別] 自動替換為對應情緒庫的日系/2ch顏文字（以程式碼區塊 `...` 格式輸出），
     並具備智慧防連續重複機制 (Anti-Consecutive Repetition)。
     """
 
@@ -144,7 +144,7 @@ class EmotionReplacer:
 
     @classmethod
     def replace_emotion_tags(cls, text: str) -> str:
-        """將字串中的所有 [emotion:xxx] 標籤替換為隨機顏文字"""
+        """將字串中的所有 [emotion:xxx] 標籤替換為以行內程式碼區塊 `...` 包裹的隨機顏文字"""
         if not text or "[emotion:" not in text:
             return text
 
@@ -154,7 +154,10 @@ class EmotionReplacer:
         def _repl(match: re.Match) -> str:
             cat = match.group(1)
             kaomoji = cls.get_random_kaomoji(cat)
-            return f" {kaomoji}" if kaomoji else ""
+            if not kaomoji:
+                return ""
+            safe_kaomoji = kaomoji.replace("`", "´")
+            return f" `{safe_kaomoji}`"
 
         rendered = cls._tag_regex.sub(_repl, text)
         # 清理多餘的連續空格
