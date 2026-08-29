@@ -4,6 +4,10 @@ from typing import List, Any, Dict, Tuple
 import yaml
 from dotenv import load_dotenv
 
+from .logger import get_logger
+
+logger = get_logger("config")
+
 # 專案根目錄 (C:\ALL FILES\Code\friend-bot)
 BASE_DIR = Path(__file__).resolve().parents[3]
 
@@ -24,13 +28,20 @@ def _find_config_file() -> Path:
 CONFIG_PATH = _find_config_file()
 
 def _load_yaml_config() -> Dict[str, Any]:
-    if CONFIG_PATH.exists():
-        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-            try:
-                return yaml.safe_load(f) or {}
-            except Exception as e:
-                print(f"[Warning] Failed to parse config.yaml from {CONFIG_PATH}: {e}")
-    return {}
+    """
+    載入 config.yaml。若檔案存在但解析失敗（YAML 格式錯誤），直接拋出例外中止啟動，
+    避免程式悄悄回退成全預設值運行、讓維運者誤以為設定已生效。
+    檔案不存在則視為正常情況（純用預設值），回傳空字典。
+    """
+    if not CONFIG_PATH.exists():
+        return {}
+
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+        try:
+            return yaml.safe_load(f) or {}
+        except Exception as e:
+            logger.error(f"設定檔 {CONFIG_PATH} 解析失敗，請檢查 YAML 格式是否正確：{e}")
+            raise RuntimeError(f"無法解析設定檔 {CONFIG_PATH}：{e}") from e
 
 _yaml_config = _load_yaml_config()
 

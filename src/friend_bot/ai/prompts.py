@@ -2,6 +2,7 @@ from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
 import re
 from src.friend_bot.core.config import SYSTEM_PROMPT, BOT_NAME, ENABLE_FAVORABILITY
+from src.friend_bot.memory.memory_manager import MemoryManager
 
 # 4 階 Tier 傲嬌態度動態指令對照表
 TIER_ATTITUDE_MAP = {
@@ -72,7 +73,7 @@ def format_memory_context(
 
         facts = user_profile.get("facts", [])
         if facts:
-            fact_strings = [f["text"] if isinstance(f, dict) else str(f) for f in facts]
+            fact_strings = MemoryManager.to_fact_texts(facts)
             profile_lines.append("- 已知特徵/喜好: " + "、".join(fact_strings))
         notes = user_profile.get("interaction_notes", "")
         if notes:
@@ -88,7 +89,7 @@ def format_memory_context(
             o_notes = o_profile.get("interaction_notes", "")
             o_tier = o_profile.get("relationship_tier", "familiar")
             
-            fact_strings = [f["text"] if isinstance(f, dict) else str(f) for f in o_facts]
+            fact_strings = MemoryManager.to_fact_texts(o_facts)
             fact_str = "、".join(fact_strings) if fact_strings else "尚無特定記錄"
             note_str = o_notes if o_notes else "尚無特別印象"
             
@@ -174,6 +175,15 @@ def parse_burst_reply_response(raw_text: str, default_target_id: str = "") -> Tu
     
     return default_target_id, cleaned
 
+# 【輸出規範】與收尾指令：兩種提煉 Prompt（單次即時 / 多輪批次）共用同一份輸出格式要求，
+# 抽成共用常數避免未來調整輸出格式時漏改其中一處。至於「好感度評估」「深度結構化社交印象」等規則，
+# 單次即時與多輪批次兩種情境刻意使用不同措辭調校（前者針對單則發言的即時反應，後者針對整段對話的
+# 總結），因此保留在各自函式中分別維護，不強行合併。
+_EXTRACTION_OUTPUT_FORMAT_RULE = """5. 【輸出規範】：
+   - 輸出嚴格的 JSON 物件，包含 "updates" 陣列。"""
+
+_EXTRACTION_OUTPUT_CLOSING_INSTRUCTION = "請直接輸出 JSON，不要附帶任何多餘文字。"
+
 def build_multi_entity_extraction_prompt(
     speaker: Dict[str, Any],
     other_users: List[Dict[str, Any]],
@@ -185,7 +195,7 @@ def build_multi_entity_extraction_prompt(
     speaker_name = speaker.get("user_name", "當前發言者")
     speaker_id = str(speaker.get("user_id", ""))
     raw_sp_facts = speaker.get("facts", [])
-    speaker_facts = "、".join([f["text"] if isinstance(f, dict) else str(f) for f in raw_sp_facts]) or "尚無"
+    speaker_facts = "、".join(MemoryManager.to_fact_texts(raw_sp_facts)) or "尚無"
     speaker_notes = speaker.get("interaction_notes", "") or "尚無"
     speaker_fav = speaker.get("favorability", 30)
 
@@ -196,7 +206,7 @@ def build_multi_entity_extraction_prompt(
             u_name = u.get("user_name", "群友")
             u_id = str(u.get("user_id", ""))
             raw_u_facts = u.get("facts", [])
-            u_facts = "、".join([f["text"] if isinstance(f, dict) else str(f) for f in raw_u_facts]) or "尚無"
+            u_facts = "、".join(MemoryManager.to_fact_texts(raw_u_facts)) or "尚無"
             u_notes = u.get("interaction_notes", "") or "尚無"
             lines.append(f"- 【{u_name}】(ID: {u_id}):\n  • 目前事實: {u_facts}\n  • 目前印象: {u_notes}")
         other_users_text = "\n".join(lines)
@@ -237,8 +247,7 @@ def build_multi_entity_extraction_prompt(
      * 【核心性格】：沉澱長期穩定的人格基調（中二、理性、溫柔、幽默自嘲等），若歷史已有記錄請參考保留並適度微調深化。
      * 【社交關係】：記錄對特定群友（如桶子、真由理等）的互動默契與態度，以及與紅莉栖的互動張力（傲嬌、調侃、尊重等）。
      * 【近期動態】：根據最新對話滾動更新當前的生活狀態、話題焦點、抱怨、作息或情緒動向。
-5. 【輸出規範】：
-   - 輸出嚴格的 JSON 物件，包含 "updates" 陣列。
+{_EXTRACTION_OUTPUT_FORMAT_RULE}
 
 【輸出 JSON 範例】：
 ```json
@@ -264,7 +273,7 @@ def build_multi_entity_extraction_prompt(
 }}
 ```
 
-請直接輸出 JSON，不要附帶任何多餘文字。"""
+{_EXTRACTION_OUTPUT_CLOSING_INSTRUCTION}"""
 
 def build_batch_dialogue_extraction_prompt(
     dialogue_messages: List[Dict[str, Any]],
@@ -278,7 +287,7 @@ def build_batch_dialogue_extraction_prompt(
         u_name = p.get("user_name", "未知群友")
         u_id = str(p.get("user_id", ""))
         raw_p_facts = p.get("facts", [])
-        facts_str = "、".join([f["text"] if isinstance(f, dict) else str(f) for f in raw_p_facts]) or "尚無"
+        facts_str = "、".join(MemoryManager.to_fact_texts(raw_p_facts)) or "尚無"
         notes_str = p.get("interaction_notes", "") or "尚無"
         fav_val = p.get("favorability", 30)
         profiles_text_list.append(f"- 【{u_name}】(ID: {u_id}, 目前好感: {fav_val}):\n  • 目前事實: {facts_str}\n  • 目前印象: {notes_str}")
@@ -320,8 +329,7 @@ def build_batch_dialogue_extraction_prompt(
      * 【核心性格】：沉澱長期穩定的人格特質基調，參考歷史記錄適度保留。
      * 【社交關係】：記錄對其他群友的互動態度，以及與紅莉栖的互動默契。
      * 【近期動態】：根據此批對話總結最近的生活焦點、情緒或話題動態。
-5. 【輸出規範】：
-   - 輸出嚴格的 JSON 物件，包含 "updates" 陣列。
+{_EXTRACTION_OUTPUT_FORMAT_RULE}
 
 【輸出 JSON 範例】：
 ```json
@@ -347,4 +355,4 @@ def build_batch_dialogue_extraction_prompt(
 }}
 ```
 
-請直接輸出 JSON，不要附帶任何多餘文字。"""
+{_EXTRACTION_OUTPUT_CLOSING_INSTRUCTION}"""
