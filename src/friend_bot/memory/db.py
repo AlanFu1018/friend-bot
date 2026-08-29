@@ -6,6 +6,13 @@ from src.friend_bot.core.logger import get_logger
 
 logger = get_logger("database")
 
+# FTS 索引 schema 版本（記錄於 SQLite 原生的 PRAGMA user_version）
+# 1 = messages_fts 改存 n-gram 切詞後的檢索字串，並移除從未寫入過的 channel_id / msg_id 欄位
+FTS_SCHEMA_VERSION = 1
+
+# 重建索引時每批處理的訊息數量
+_FTS_REBUILD_BATCH_SIZE = 500
+
 @asynccontextmanager
 async def get_db_connection():
     """非同步資料庫連線上線器 (Async Context Manager)"""
@@ -54,13 +61,13 @@ async def init_db():
         await db.execute("CREATE INDEX IF NOT EXISTS idx_messages_unextracted ON messages(channel_id, extracted, id ASC);")
 
         # 2. 全文搜尋虛擬表 (FTS5)
+        # content 欄位存的是經 n-gram 切詞後的檢索字串（見 MemoryManager.build_search_blob），
+        # 而非訊息原文；顯示時一律 JOIN 回 messages 取原文。
         try:
             await db.execute("""
             CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
                 content,
-                user_name,
-                channel_id UNINDEXED,
-                msg_id UNINDEXED
+                user_name
             );
             """)
         except Exception as e:
@@ -137,7 +144,90 @@ async def init_db():
         """)
 
         await db.commit()
+
+        # 5. 檢查並在必要時重建 FTS 索引（見 _rebuild_fts_index 說明）
+        await _rebuild_fts_index_if_needed(db)
+
         logger.info(f"SQLite 資料庫結構就緒: {DB_PATH}")
+
+async def _rebuild_fts_index_if_needed(db) -> None:
+    """
+    偵測 FTS 索引是否為舊版格式，若是則從 messages 表全量重建。
+
+    舊版索引直接存訊息原文，但 FTS5 預設的 unicode61 分詞器會把整串連續中文視為
+    單一 token，導致中文查詢幾乎永遠無法命中。新版改存 n-gram 切詞後的檢索字串。
+
+    messages 表是原始資料的唯一真實來源，messages_fts 只是其衍生索引，因此重建為
+    無損操作；user_profiles（事實、好感度、互動印象）完全不受影響。
+    以 PRAGMA user_version 作為版本標記，確保重建只會發生一次。
+    """
+    # 延遲匯入以避免與 memory_manager 形成循環相依
+    from .memory_manager import MemoryManager
+
+    try:
+        async with db.execute("PRAGMA user_version;") as cursor:
+            row = await cursor.fetchone()
+            current_version = int(row[0]) if row else 0
+    except Exception as e:
+        logger.warning(f"無法讀取 FTS schema 版本，略過索引重建: {e}")
+        return
+
+    if current_version >= FTS_SCHEMA_VERSION:
+        return
+
+    logger.info(
+        f"偵測到舊版 FTS 索引格式 (version={current_version})，開始從 messages 表重建全文索引…"
+    )
+
+    try:
+        await db.execute("DROP TABLE IF EXISTS messages_fts;")
+        await db.execute("""
+        CREATE VIRTUAL TABLE messages_fts USING fts5(
+            content,
+            user_name
+        );
+        """)
+
+        total = 0
+        last_rowid = 0
+        while True:
+            # 必須顯式取別名：messages 宣告了 id INTEGER PRIMARY KEY，SQLite 會把
+            # SELECT rowid 的結果欄位命名為該別名 (id)，直接用 row["rowid"] 會取不到值。
+            async with db.execute("""
+            SELECT rowid AS rid, content, user_name
+            FROM messages
+            WHERE rowid > ?
+            ORDER BY rowid ASC
+            LIMIT ?
+            """, (last_rowid, _FTS_REBUILD_BATCH_SIZE)) as cursor:
+                rows = await cursor.fetchall()
+
+            if not rows:
+                break
+
+            await db.executemany(
+                "INSERT INTO messages_fts (rowid, content, user_name) VALUES (?, ?, ?)",
+                [
+                    (
+                        row["rid"],
+                        MemoryManager.build_search_blob(str(row["content"] or "")),
+                        str(row["user_name"] or "")
+                    )
+                    for row in rows
+                ]
+            )
+            await db.commit()
+
+            last_rowid = rows[-1]["rid"]
+            total += len(rows)
+            logger.info(f"  FTS 索引重建進度：已處理 {total} 則訊息…")
+
+        await db.execute(f"PRAGMA user_version = {FTS_SCHEMA_VERSION};")
+        await db.commit()
+        logger.info(f"✅ FTS 全文索引重建完成，共重新索引 {total} 則訊息。")
+
+    except Exception as e:
+        logger.error(f"FTS 索引重建失敗: {e}", exc_info=True)
 
 async def clear_all_memory() -> None:
     """清空所有記憶（包含所有頻道歷史對話、FTS5 全文索引、用戶畫像與行事曆）"""

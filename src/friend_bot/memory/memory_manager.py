@@ -8,6 +8,8 @@ from .db import get_db_connection
 from src.friend_bot.core.config import (
     SHORT_TERM_HISTORY_LIMIT,
     HISTORY_RECALL_LIMIT,
+    HISTORY_RECALL_MIN_SCORE,
+    HISTORY_RECALL_MAX_QUERY_TOKENS,
     DEFAULT_FAVORABILITY,
     DAILY_GAIN_LIMIT,
     DAILY_LOSS_LIMIT,
@@ -258,6 +260,20 @@ class MemoryManager:
         return keywords
 
     @staticmethod
+    def build_search_blob(text: str) -> str:
+        """
+        將訊息內容轉為 FTS5 可正確切分的 n-gram 檢索字串（供寫入 messages_fts 索引）。
+
+        SQLite FTS5 預設的 unicode61 分詞器會把一整串連續中文視為「單一 token」，
+        導致「通宵」這類詞永遠無法命中（只有查詢完整原句才會匹配）。因此改由應用層
+        先切好詞、以空白分隔後再交給 FTS5 索引。
+
+        索引側與查詢側共用同一個 extract_keywords()，確保兩邊切詞規則永遠對稱，
+        這是本機制能成立的根本前提。
+        """
+        return " ".join(sorted(MemoryManager.extract_keywords(text)))
+
+    @staticmethod
     def filter_facts_three_tracks(
         facts_data: List[Any],
         query_text: str = "",
@@ -420,10 +436,12 @@ class MemoryManager:
                 1 if extracted else 0
             ))
 
+            # FTS 索引存的是經 n-gram 切詞後的檢索字串而非原文；顯示時一律 JOIN 回
+            # messages.content 取原文，因此不影響可讀性（見 build_search_blob 說明）。
             await db.execute("""
             INSERT OR REPLACE INTO messages_fts (rowid, content, user_name)
-            SELECT rowid, content, user_name FROM messages WHERE message_id = ?
-            """, (str(message_id),))
+            SELECT rowid, ?, user_name FROM messages WHERE message_id = ?
+            """, (MemoryManager.build_search_blob(str(content)), str(message_id)))
 
             await db.commit()
 
@@ -671,18 +689,26 @@ class MemoryManager:
     async def recall_deep_history(
         query_text: str,
         exclude_message_ids: Optional[List[str]] = None,
-        limit: int = HISTORY_RECALL_LIMIT
+        limit: int = HISTORY_RECALL_LIMIT,
+        min_score: int = HISTORY_RECALL_MIN_SCORE,
+        max_query_tokens: int = HISTORY_RECALL_MAX_QUERY_TOKENS
     ) -> List[Dict[str, Any]]:
-        """跨頻道全文檢索回憶（FTS5 全文搜尋）"""
-        clean_query = query_text.strip()
-        if not clean_query:
+        """
+        跨頻道深度歷史回憶（FTS5 全文檢索 + 相關性門檻過濾）。
+
+        查詢側與索引側共用 extract_keywords() 切詞，確保中文二字詞（通宵、拉麵、鍵盤）
+        能正常命中。FTS5 只負責粗篩候選，最終相關性由「命中的不同關鍵字數」在應用層
+        判定，語意明確且不依賴 bm25 的黑箱分數。
+        """
+        keywords = MemoryManager.extract_keywords(query_text)
+        if not keywords:
             return []
 
-        search_tokens = [t for t in clean_query.split() if len(t) >= 2 and t not in STOPWORDS]
-        if not search_tokens:
-            search_tokens = [clean_query[:20]]
-
-        fts_match_query = " OR ".join(f'"{token}"' for token in search_tokens)
+        # 依長度排序取前 N 個（3-gram 較具鑑別度），超過上限的短關鍵字直接捨棄。
+        # 多人群聊 (Burst) 的合併查詢串可能產生數百個關鍵字，未設限會撞上 SQLite
+        # 運算式深度上限。
+        tokens = sorted(keywords, key=len, reverse=True)[:max_query_tokens]
+        fts_match_query = " OR ".join(f'"{token}"' for token in tokens)
         exclude_ids = set(exclude_message_ids or [])
 
         async with get_db_connection() as db:
@@ -693,13 +719,29 @@ class MemoryManager:
             WHERE messages_fts MATCH ?
             ORDER BY rank
             LIMIT ?
-            """, (fts_match_query, limit * 3)) as cursor:
+            """, (fts_match_query, max(limit * 5, limit))) as cursor:
                 rows = await cursor.fetchall()
-                results = []
-                for row in rows:
-                    r_dict = dict(row)
-                    if str(r_dict["message_id"]) not in exclude_ids:
-                        results.append(r_dict)
-                    if len(results) >= limit:
-                        break
-                return results
+
+        # 以原文重新切詞取交集，並依「最長共同詞彙的字數」判定相關性。
+        # 用最長詞長而非命中數量作為門檻，是為了讓門檻值有直觀語意：min_score=2 即
+        # 「至少共享一個二字詞」。若改用命中數量，單一個二字詞只會得 1 分而被門檻 2
+        # 擋掉，等於又讓中文最常見的二字詞無法召回。
+        scored: List[Tuple[int, int, int, Dict[str, Any]]] = []
+        for row in rows:
+            r_dict = dict(row)
+            if str(r_dict["message_id"]) in exclude_ids:
+                continue
+
+            matched = keywords & MemoryManager.extract_keywords(str(r_dict.get("content", "")))
+            if not matched:
+                continue
+
+            longest_match = max(len(t) for t in matched)
+            if longest_match < min_score:
+                continue
+
+            scored.append((longest_match, len(matched), int(r_dict.get("timestamp", 0)), r_dict))
+
+        # 先比最長共同詞彙，再比命中詞彙數量，最後取較新的訊息
+        scored.sort(key=lambda x: (x[0], x[1], x[2]), reverse=True)
+        return [item[3] for item in scored[:limit]]

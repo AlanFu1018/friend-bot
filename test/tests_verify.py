@@ -749,6 +749,114 @@ class TestFriendBotFeatures(unittest.IsolatedAsyncioTestCase):
                 mock_save.assert_not_called()
                 mock_listen.assert_not_called()
 
+    # ==================== 18. 第三層深度歷史回憶 (中文 n-gram 召回) 測試 ====================
+    def test_build_search_blob_chinese_ngrams(self):
+        """索引側切詞：中文訊息應被展開為空白分隔的 2/3-gram，FTS5 才切得開"""
+        blob = MemoryManager.build_search_blob("昨天去吃拉麵")
+        tokens = set(blob.split())
+
+        # 二字詞與三字詞都應存在
+        self.assertIn("拉麵", tokens)
+        self.assertIn("吃拉麵", tokens)
+        # 停用詞應被濾除
+        self.assertNotIn("昨天", tokens)
+        # 必須是空白分隔（否則 FTS5 仍會視為單一 token）
+        self.assertGreater(len(tokens), 3)
+
+        # 英文實詞應保留並轉小寫
+        en_tokens = set(MemoryManager.build_search_blob("我在玩 Elden Ring").split())
+        self.assertIn("elden", en_tokens)
+        self.assertIn("ring", en_tokens)
+
+    async def _seed_history_message(self, message_id: str, content: str, user_name: str = "岡部",
+                                    channel_id: str = "777", timestamp: int = None):
+        """測試輔助：寫入一則歷史訊息（會同時建立 FTS 索引）"""
+        await MemoryManager.save_message(
+            message_id=message_id,
+            channel_id=channel_id,
+            user_id="1001",
+            user_name=user_name,
+            content=content,
+            timestamp=timestamp if timestamp is not None else int(time.time())
+        )
+
+    async def test_deep_history_recall_chinese_two_char_word(self):
+        """核心迴歸測試：中文二字詞（拉麵）必須能召回，修復前此測試會失敗"""
+        await self._seed_history_message("m-ramen", "上禮拜去吃的那家拉麵店湯頭超讚")
+        await self._seed_history_message("m-keyboard", "我買了新的靜音機械鍵盤")
+
+        results = await MemoryManager.recall_deep_history(query_text="今晚要不要再去吃拉麵？")
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(str(results[0]["message_id"]), "m-ramen")
+        # 回傳的必須是原文，而非索引中的 n-gram 檢索字串
+        self.assertEqual(results[0]["content"], "上禮拜去吃的那家拉麵店湯頭超讚")
+        self.assertNotIn(" ", results[0]["content"][:6])
+
+    async def test_deep_history_recall_min_score_threshold(self):
+        """相關性門檻：完全無關的話題不應召回任何歷史"""
+        await self._seed_history_message("m-ramen", "上禮拜去吃的那家拉麵店湯頭超讚")
+
+        results = await MemoryManager.recall_deep_history(query_text="幫我查一下明天的氣象預報")
+        self.assertEqual(results, [])
+
+        # 門檻調高後，原本命中的查詢也應被濾掉
+        strict = await MemoryManager.recall_deep_history(
+            query_text="今晚要不要再去吃拉麵？",
+            min_score=99
+        )
+        self.assertEqual(strict, [])
+
+    async def test_deep_history_recall_excludes_recent_messages(self):
+        """exclude_message_ids 應正確排除短期記憶中已存在的訊息"""
+        await self._seed_history_message("m-ramen-1", "上禮拜去吃的那家拉麵店湯頭超讚")
+        await self._seed_history_message("m-ramen-2", "那家拉麵店的叉燒也很不錯")
+
+        all_results = await MemoryManager.recall_deep_history(query_text="想吃拉麵")
+        self.assertEqual(len(all_results), 2)
+
+        filtered = await MemoryManager.recall_deep_history(
+            query_text="想吃拉麵",
+            exclude_message_ids=["m-ramen-1"]
+        )
+        self.assertEqual([str(r["message_id"]) for r in filtered], ["m-ramen-2"])
+
+    async def test_deep_history_recall_respects_limit_and_ordering(self):
+        """回傳則數受 limit 控制，且相關性高者優先"""
+        await self._seed_history_message("m-low", "拉麵", timestamp=1000)
+        await self._seed_history_message("m-high", "那家拉麵店的叉燒拉麵最好吃", timestamp=900)
+        await self._seed_history_message("m-mid", "我也想吃拉麵店", timestamp=800)
+
+        results = await MemoryManager.recall_deep_history(query_text="叉燒拉麵店", limit=2)
+
+        self.assertEqual(len(results), 2)
+        # 命中關鍵字最多的應排在最前面
+        self.assertEqual(str(results[0]["message_id"]), "m-high")
+
+    def test_history_timestamp_rendering_in_prompt(self):
+        """歷史回憶應顯示發言時間；修復前因讀取不存在的 created_at key 而永遠為空"""
+        ts = int(datetime(2026, 8, 20, 14, 30).timestamp())
+        context_str = format_memory_context(
+            current_user_name="岡部",
+            user_profile=None,
+            deep_history=[{"user_name": "桶子", "content": "我換了靜音紅軸", "timestamp": ts}],
+            short_term_history=[]
+        )
+
+        self.assertIn("2026-08-20 14:30", context_str)
+        self.assertIn("桶子: 我換了靜音紅軸", context_str)
+        # 不應再出現空的方括號
+        self.assertNotIn("- [] ", context_str)
+
+        # timestamp 缺失或格式異常時應優雅退化為不顯示日期，而非拋出例外
+        degraded = format_memory_context(
+            current_user_name="岡部",
+            user_profile=None,
+            deep_history=[{"user_name": "桶子", "content": "沒有時間戳", "timestamp": None}],
+            short_term_history=[]
+        )
+        self.assertIn("- 桶子: 沒有時間戳", degraded)
+
 
 if __name__ == "__main__":
     unittest.main()

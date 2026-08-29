@@ -104,6 +104,15 @@ memory:
   
   # 每次歷史回憶檢索注入的歷史片段數量上限
   history_recall_limit: 4
+
+  # 深層回憶的最低相關性門檻：一則歷史訊息需與當前話題共享「至少幾個字的共同詞彙」
+  # 2 = 至少共享一個二字詞（如「拉麵」）；3 = 只有三字以上的詞才算相關（更嚴格）
+  # （調高 = 寧缺勿濫，寧可不召回也不把無關舊話塞進 prompt；調低 = 廣泛召回）
+  history_recall_min_score: 2
+
+  # 單次深層回憶查詢最多帶入的關鍵字數量上限（超過則優先捨棄較短、鑑別度較低的關鍵字）
+  # 避免多人群聊 (Burst) 的長查詢串產生過於龐大的 FTS5 MATCH 運算式
+  history_recall_max_query_tokens: 30
   
   # 本地 SQLite 資料庫儲存路徑（永久保存所有訊息與記憶）
   db_path: "data/friend_bot.db"

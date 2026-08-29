@@ -51,6 +51,15 @@ def build_system_instruction() -> str:
 9. 不需要每次回覆都把對方的名字掛在嘴邊，保持自然聊天節奏。
 """
 
+def format_history_timestamp(raw_ts: Any) -> str:
+    """將歷史回憶訊息的 Unix timestamp 格式化為可讀日期；無法解析時回傳空字串"""
+    if raw_ts in (None, ""):
+        return ""
+    try:
+        return datetime.fromtimestamp(int(raw_ts)).strftime("%Y-%m-%d %H:%M")
+    except (ValueError, TypeError, OSError, OverflowError):
+        return ""
+
 def format_memory_context(
     current_user_name: str,
     user_profile: Optional[Dict[str, Any]],
@@ -110,8 +119,10 @@ def format_memory_context(
         for item in deep_history:
             u_name = item.get("user_name", "未知")
             content = item.get("content", "")
-            created = item.get("created_at", "")
-            history_lines.append(f"- [{created}] {u_name}: {content}")
+            # 使用 timestamp（Discord 上實際發言時間），而非 messages.created_at（寫入資料庫的時間）
+            spoken_at = format_history_timestamp(item.get("timestamp"))
+            prefix = f"[{spoken_at}] " if spoken_at else ""
+            history_lines.append(f"- {prefix}{u_name}: {content}")
         context_parts.append("\n".join(history_lines))
 
     # 5. 近期頻道對話紀錄 (第 1 層)

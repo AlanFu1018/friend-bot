@@ -123,6 +123,8 @@ SHORT_TERM_HISTORY_LIMIT: int = int(_mem_cfg.get("short_term_history_limit", 15)
 ENABLE_AUTO_MEMORY_EXTRACTION: bool = bool(_mem_cfg.get("enable_auto_memory_extraction", True))
 ENABLE_HISTORY_RECALL: bool = bool(_mem_cfg.get("enable_history_recall", True))
 HISTORY_RECALL_LIMIT: int = int(_mem_cfg.get("history_recall_limit", 4))
+HISTORY_RECALL_MIN_SCORE: int = int(_mem_cfg.get("history_recall_min_score", 2))
+HISTORY_RECALL_MAX_QUERY_TOKENS: int = int(_mem_cfg.get("history_recall_max_query_tokens", 30))
 DB_PATH: str = str(BASE_DIR / _mem_cfg.get("db_path", "data/friend_bot.db"))
 
 # 7.1 三軌事實記憶檢索 (3-Track Fact RAG & Heat) 設定
