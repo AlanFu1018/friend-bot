@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from contextlib import asynccontextmanager
 import aiosqlite
@@ -6,9 +7,11 @@ from src.friend_bot.core.logger import get_logger
 
 logger = get_logger("database")
 
-# FTS 索引 schema 版本（記錄於 SQLite 原生的 PRAGMA user_version）
+# 資料庫 schema 版本（記錄於 SQLite 原生的 PRAGMA user_version）
 # 1 = messages_fts 改存 n-gram 切詞後的檢索字串，並移除從未寫入過的 channel_id / msg_id 欄位
-FTS_SCHEMA_VERSION = 1
+# 2 = 修復重複提煉造成的資料污染：回填被改錯的 user_name、重置被灌水的事實熱度 hits
+SCHEMA_VERSION = 2
+FTS_SCHEMA_VERSION = 1  # 保留舊名稱以相容既有引用
 
 # 重建索引時每批處理的訊息數量
 _FTS_REBUILD_BATCH_SIZE = 500
@@ -145,89 +148,160 @@ async def init_db():
 
         await db.commit()
 
-        # 5. 檢查並在必要時重建 FTS 索引（見 _rebuild_fts_index 說明）
-        await _rebuild_fts_index_if_needed(db)
+        # 5. 依 schema 版本執行必要的資料遷移
+        await _run_migrations(db)
 
         logger.info(f"SQLite 資料庫結構就緒: {DB_PATH}")
 
-async def _rebuild_fts_index_if_needed(db) -> None:
+async def _run_migrations(db) -> None:
     """
-    偵測 FTS 索引是否為舊版格式，若是則從 messages 表全量重建。
+    依 PRAGMA user_version 逐階段執行資料遷移。
+
+    每個階段都設計為可重複執行（idempotent），因此若中途失敗不會提升版本號，
+    下次啟動會從頭重跑，不會留下半套狀態。
+    """
+    try:
+        async with db.execute("PRAGMA user_version;") as cursor:
+            row = await cursor.fetchone()
+            current_version = int(row[0]) if row else 0
+    except Exception as e:
+        logger.warning(f"無法讀取資料庫 schema 版本，略過遷移: {e}")
+        return
+
+    if current_version >= SCHEMA_VERSION:
+        return
+
+    logger.info(f"偵測到舊版資料庫 (version={current_version} → {SCHEMA_VERSION})，開始執行遷移…")
+
+    try:
+        if current_version < 1:
+            await _rebuild_fts_index(db)
+        if current_version < 2:
+            await _repair_extraction_pollution(db)
+    except Exception as e:
+        logger.error(f"資料庫遷移失敗（版本維持 {current_version}，下次啟動將重試）: {e}", exc_info=True)
+        return
+
+    await db.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
+    await db.commit()
+    logger.info(f"✅ 資料庫遷移完成，schema 版本已更新為 {SCHEMA_VERSION}。")
+
+async def _repair_extraction_pollution(db) -> None:
+    """
+    【遷移 v2】修復重複提煉造成的兩類資料污染。
+
+    1. `user_name` 被改成別人的名字：舊版 `client.py` 的 JIT 迴圈對每位使用者都傳入
+       「最後一則訊息發言者」的名字，該名字經提煉 prompt 流入模型輸出後被寫回畫像。
+       `messages` 表保存了每則訊息當下由 Discord 提供的正確 `user_name`，取每位
+       使用者最新一筆回填即可修復。
+
+    2. 事實熱度 `hits` 被灌水：舊版每則訊息會被 JIT 與收尾提煉各提煉一次，第二次會被
+       `merge_facts` 判定為「重複確認」而 hits += 3。污染程度依每條事實被提煉過幾次而
+       異、無法精確回推，因此一律重置為 1，讓熱度從乾淨的基準重新累積。
+    """
+    from .memory_manager import MemoryManager
+
+    # 1. 從 messages 回填權威 user_name
+    await db.execute("""
+    UPDATE user_profiles
+    SET user_name = (
+        SELECT m.user_name FROM messages m
+        WHERE m.user_id = user_profiles.user_id AND m.is_bot = 0
+        ORDER BY m.timestamp DESC, m.id DESC
+        LIMIT 1
+    )
+    WHERE EXISTS (
+        SELECT 1 FROM messages m
+        WHERE m.user_id = user_profiles.user_id AND m.is_bot = 0
+    )
+    """)
+    await db.commit()
+
+    async with db.execute("SELECT changes();") as cursor:
+        row = await cursor.fetchone()
+        renamed = int(row[0]) if row else 0
+
+    # 2. 重置被灌水的事實熱度
+    async with db.execute("SELECT user_id, facts FROM user_profiles") as cursor:
+        rows = await cursor.fetchall()
+
+    reset_facts = 0
+    for row in rows:
+        facts = MemoryManager.normalize_facts(row["facts"])
+        if not facts:
+            continue
+        for f in facts:
+            f["hits"] = 1
+        reset_facts += len(facts)
+        await db.execute(
+            "UPDATE user_profiles SET facts = ? WHERE user_id = ?",
+            (json.dumps(facts, ensure_ascii=False), row["user_id"])
+        )
+    await db.commit()
+
+    logger.info(
+        f"🔧 [遷移 v2] 已從 messages 回填 {renamed} 筆畫像的 user_name，"
+        f"並將 {reset_facts} 條事實的熱度重置為 1。"
+    )
+
+async def _rebuild_fts_index(db) -> None:
+    """
+    【遷移 v1】從 messages 表全量重建 FTS 索引。
 
     舊版索引直接存訊息原文，但 FTS5 預設的 unicode61 分詞器會把整串連續中文視為
     單一 token，導致中文查詢幾乎永遠無法命中。新版改存 n-gram 切詞後的檢索字串。
 
     messages 表是原始資料的唯一真實來源，messages_fts 只是其衍生索引，因此重建為
     無損操作；user_profiles（事實、好感度、互動印象）完全不受影響。
-    以 PRAGMA user_version 作為版本標記，確保重建只會發生一次。
     """
     # 延遲匯入以避免與 memory_manager 形成循環相依
     from .memory_manager import MemoryManager
 
-    try:
-        async with db.execute("PRAGMA user_version;") as cursor:
-            row = await cursor.fetchone()
-            current_version = int(row[0]) if row else 0
-    except Exception as e:
-        logger.warning(f"無法讀取 FTS schema 版本，略過索引重建: {e}")
-        return
+    logger.info("開始從 messages 表重建全文索引…")
 
-    if current_version >= FTS_SCHEMA_VERSION:
-        return
+    await db.execute("DROP TABLE IF EXISTS messages_fts;")
+    await db.execute("""
+    CREATE VIRTUAL TABLE messages_fts USING fts5(
+        content,
+        user_name
+    );
+    """)
 
-    logger.info(
-        f"偵測到舊版 FTS 索引格式 (version={current_version})，開始從 messages 表重建全文索引…"
-    )
+    total = 0
+    last_rowid = 0
+    while True:
+        # 必須顯式取別名：messages 宣告了 id INTEGER PRIMARY KEY，SQLite 會把
+        # SELECT rowid 的結果欄位命名為該別名 (id)，直接用 row["rowid"] 會取不到值。
+        async with db.execute("""
+        SELECT rowid AS rid, content, user_name
+        FROM messages
+        WHERE rowid > ?
+        ORDER BY rowid ASC
+        LIMIT ?
+        """, (last_rowid, _FTS_REBUILD_BATCH_SIZE)) as cursor:
+            rows = await cursor.fetchall()
 
-    try:
-        await db.execute("DROP TABLE IF EXISTS messages_fts;")
-        await db.execute("""
-        CREATE VIRTUAL TABLE messages_fts USING fts5(
-            content,
-            user_name
-        );
-        """)
+        if not rows:
+            break
 
-        total = 0
-        last_rowid = 0
-        while True:
-            # 必須顯式取別名：messages 宣告了 id INTEGER PRIMARY KEY，SQLite 會把
-            # SELECT rowid 的結果欄位命名為該別名 (id)，直接用 row["rowid"] 會取不到值。
-            async with db.execute("""
-            SELECT rowid AS rid, content, user_name
-            FROM messages
-            WHERE rowid > ?
-            ORDER BY rowid ASC
-            LIMIT ?
-            """, (last_rowid, _FTS_REBUILD_BATCH_SIZE)) as cursor:
-                rows = await cursor.fetchall()
-
-            if not rows:
-                break
-
-            await db.executemany(
-                "INSERT INTO messages_fts (rowid, content, user_name) VALUES (?, ?, ?)",
-                [
-                    (
-                        row["rid"],
-                        MemoryManager.build_search_blob(str(row["content"] or "")),
-                        str(row["user_name"] or "")
-                    )
-                    for row in rows
-                ]
-            )
-            await db.commit()
-
-            last_rowid = rows[-1]["rid"]
-            total += len(rows)
-            logger.info(f"  FTS 索引重建進度：已處理 {total} 則訊息…")
-
-        await db.execute(f"PRAGMA user_version = {FTS_SCHEMA_VERSION};")
+        await db.executemany(
+            "INSERT INTO messages_fts (rowid, content, user_name) VALUES (?, ?, ?)",
+            [
+                (
+                    row["rid"],
+                    MemoryManager.build_search_blob(str(row["content"] or "")),
+                    str(row["user_name"] or "")
+                )
+                for row in rows
+            ]
+        )
         await db.commit()
-        logger.info(f"✅ FTS 全文索引重建完成，共重新索引 {total} 則訊息。")
 
-    except Exception as e:
-        logger.error(f"FTS 索引重建失敗: {e}", exc_info=True)
+        last_rowid = rows[-1]["rid"]
+        total += len(rows)
+        logger.info(f"  FTS 索引重建進度：已處理 {total} 則訊息…")
+
+    logger.info(f"✅ FTS 全文索引重建完成，共重新索引 {total} 則訊息。")
 
 async def clear_all_memory() -> None:
     """清空所有記憶（包含所有頻道歷史對話、FTS5 全文索引、用戶畫像與行事曆）"""

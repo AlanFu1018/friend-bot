@@ -524,6 +524,36 @@ class MemoryManager:
                 return name_map
 
     @staticmethod
+    async def resolve_mentioned_user_ids(
+        content: str,
+        exclude_uids: Optional[Set[str]] = None
+    ) -> List[str]:
+        """
+        從文本解析出「被談到的人」的 user_id：維度 A（Discord @提及）＋ 維度 B（暱稱文字比對）。
+
+        回覆端的畫像檢索與提煉端的白名單共用此函式，確保兩邊對「誰算是參與了這段對話」
+        的定義一致。先前兩處各自實作，導致監聽頻道的提煉白名單只認得有發言的人，
+        被提及但沒發言者的特徵會被白名單拒絕寫入（跨使用者歸屬失效）。
+        """
+        excluded = {str(u) for u in (exclude_uids or set())}
+        found: List[str] = []
+
+        # 維度 A：Discord 原生 @提及
+        for mid in re.findall(r'<@!?(\d+)>', content or ""):
+            if mid not in excluded and mid not in found:
+                found.append(mid)
+
+        # 維度 B：名稱文字比對
+        known_name_map = await MemoryManager.get_known_users_map()
+        content_lower = (content or "").lower()
+        for uname, uid in known_name_map.items():
+            if uid not in excluded and uid not in found:
+                if len(uname) >= 2 and uname in content_lower:
+                    found.append(uid)
+
+        return found
+
+    @staticmethod
     async def resolve_multi_user_profiles(
         current_user_id: str,
         content: str,
@@ -533,21 +563,10 @@ class MemoryManager:
         """多人多維畫像檢索解析器"""
         current_profile = await MemoryManager.get_user_profile(current_user_id)
 
-        target_other_uids: List[str] = []
-
-        # 維度 A：Discord 原生 @提及
-        mention_ids = re.findall(r'<@!?(\d+)>', content or "")
-        for mid in mention_ids:
-            if mid != str(current_user_id) and mid not in target_other_uids:
-                target_other_uids.append(mid)
-
-        # 維度 B：名稱文字比對
-        known_name_map = await MemoryManager.get_known_users_map()
-        content_lower = (content or "").lower()
-        for uname, uid in known_name_map.items():
-            if uid != str(current_user_id) and uid not in target_other_uids:
-                if len(uname) >= 2 and uname in content_lower:
-                    target_other_uids.append(uid)
+        # 維度 A + B（與提煉端白名單共用同一份解析邏輯）
+        target_other_uids: List[str] = await MemoryManager.resolve_mentioned_user_ids(
+            content, exclude_uids={str(current_user_id)}
+        )
 
         # 維度 C：近期頻道發言者
         if short_term_history:
@@ -654,19 +673,10 @@ class MemoryManager:
                 rows = await cursor.fetchall()
                 return [dict(row) for row in rows]
 
-    @staticmethod
-    async def get_unextracted_messages_by_user(user_id: str, limit: int = 15) -> List[Dict[str, Any]]:
-        """取得特定用戶未被提煉的訊息清單（用於 JIT 即時提煉）"""
-        async with get_db_connection() as db:
-            async with db.execute("""
-            SELECT message_id, channel_id, user_id, user_name, content, has_image, is_bot, timestamp
-            FROM messages
-            WHERE extracted = 0 AND is_bot = 0 AND user_id = ?
-            ORDER BY timestamp ASC
-            LIMIT ?
-            """, (str(user_id), limit)) as cursor:
-                rows = await cursor.fetchall()
-                return [dict(row) for row in rows]
+    # 註：原有的 get_unextracted_messages_by_user() 已隨 JIT 提煉機制一併移除。
+    # 它缺少頻道過濾，會把當前對話頻道剛存入的訊息也一起撈走，導致同一批訊息被
+    # JIT 與收尾提煉各處理一次（好感度雙倍、事實熱度灌水、API 成本雙倍）。
+    # 現在殘留的未提煉訊息一律由 MemoryExtractor.sweep_unextracted() 依頻道分組處理。
 
     @staticmethod
     async def mark_messages_extracted(message_ids: List[str]) -> None:

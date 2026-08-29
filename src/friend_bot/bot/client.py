@@ -96,6 +96,8 @@ class FriendBotClient(
         # 啟動背景定時排程器
         self.alarm_scheduler.start()
         self.calendar_scheduler.start()
+        # 背景撿漏：處理提煉失敗或重啟遺失佇列而殘留的未提煉訊息（取代原本的每則訊息 JIT）
+        self.memory_extractor.start_sweeper()
 
     async def on_ready(self):
         logger.info(f"機器人已成功登入為: {self.user} (ID: {self.user.id})")
@@ -186,11 +188,9 @@ class FriendBotClient(
                     extracted=False
                 )
 
-            all_user_ids = list(set(str(m.author.id) for m in messages))
-
-            # JIT 按需整合：消化在場用戶在監聽頻道累積的訊息
-            for uid in all_user_ids:
-                asyncio.create_task(self.memory_extractor.process_unextracted_for_user(uid, latest_user_name))
+            # 提煉一律在回覆送出後由統一入口處理（見 MemoryExtractor.extract_dialogue）。
+            # 先前這裡有一個「回覆前 JIT」迴圈，會與回覆後的收尾提煉重複處理同一批訊息，
+            # 且對每位使用者都傳入最後發言者的名字，導致畫像被改成別人的名字。
 
             # 取出短期記憶與近期訊息 ID
             short_term = await MemoryManager.get_short_term_context(channel_id)
@@ -359,35 +359,25 @@ class FriendBotClient(
                     f"氣泡數: {len(chunks)})"
                 )
 
-                # 非同步背景提煉記憶與好感度
-                if is_burst and len(messages) >= 2:
-                    dialogue_batch = [
-                        {
-                            "message_id": str(m.id),
-                            "channel_id": str(channel_id),
-                            "user_id": str(m.author.id),
-                            "user_name": m.author.display_name,
-                            "content": m.clean_content,
-                            "has_image": bool(m.attachments),
-                            "timestamp": int(m.created_at.timestamp())
-                        }
-                        for m in messages
-                    ]
-                    asyncio.create_task(
-                        self.memory_extractor.process_burst_dialogue(
-                            dialogue_messages=dialogue_batch,
-                            channel_id=channel_id
-                        )
+                # 非同步背景提煉記憶與好感度（單人／多人皆走統一入口，由它決定引擎與白名單）
+                dialogue_batch = [
+                    {
+                        "message_id": str(m.id),
+                        "channel_id": str(channel_id),
+                        "user_id": str(m.author.id),
+                        "user_name": m.author.display_name,
+                        "content": m.clean_content,
+                        "has_image": bool(m.attachments),
+                        "timestamp": int(m.created_at.timestamp())
+                    }
+                    for m in messages
+                ]
+                asyncio.create_task(
+                    self.memory_extractor.extract_dialogue(
+                        messages=dialogue_batch,
+                        channel_id=channel_id
                     )
-                else:
-                    asyncio.create_task(
-                        self.memory_extractor.extract_and_update(
-                            user_id=latest_user_id,
-                            user_name=latest_user_name,
-                            recent_messages=[m.clean_content for m in messages if m.clean_content.strip()],
-                            other_users=other_user_profiles
-                        )
-                    )
+                )
 
         except Exception as e:
             logger.error(f"對話處理失敗: {e}", exc_info=True)

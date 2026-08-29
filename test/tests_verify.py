@@ -857,6 +857,153 @@ class TestFriendBotFeatures(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("- 桶子: 沒有時間戳", degraded)
 
+    # ==================== 19. 統一提煉入口（引擎選擇／權威名稱／白名單／標記） ====================
+    def _make_extractor(self, updates, capture=None):
+        """測試輔助：建立 MemoryExtractor 並以固定 updates 回應取代 Gemini 呼叫"""
+        extractor = MemoryExtractor()
+
+        async def fake_generate(prompt, **kwargs):
+            if capture is not None:
+                capture.append(prompt)
+            return json.dumps({"updates": updates}, ensure_ascii=False)
+
+        extractor.ai.generate_response = AsyncMock(side_effect=fake_generate)
+        return extractor
+
+    async def test_unified_entry_engine_selection(self):
+        """發言者 >= 2 人走多人對話引擎，單人走單人主角引擎"""
+        multi = [
+            {"message_id": "e1", "channel_id": "777", "user_id": "1001", "user_name": "岡部",
+             "content": "桶子昨天又通宵"},
+            {"message_id": "e2", "channel_id": "777", "user_id": "2002", "user_name": "桶子",
+             "content": "哪有，我在編譯程式"},
+        ]
+        prompts = []
+        ex = self._make_extractor([], capture=prompts)
+        await ex.extract_dialogue(multi, "777")
+        self.assertIn("待分析的多輪交談對話記錄", prompts[0])
+
+        single = [{"message_id": "e3", "channel_id": "777", "user_id": "1001",
+                   "user_name": "岡部", "content": "我今天買了新鍵盤"}]
+        prompts2 = []
+        ex2 = self._make_extractor([], capture=prompts2)
+        await ex2.extract_dialogue(single, "777")
+        self.assertIn("當前發言者 (Speaker)", prompts2[0])
+
+    async def test_user_name_never_taken_from_model_output(self):
+        """權威名稱防線：模型回傳錯誤的 user_name 不得污染畫像"""
+        await MemoryManager.update_user_profile("1001", "岡部", facts=[])
+        await MemoryManager.update_user_profile("2002", "桶子", facts=[])
+
+        messages = [
+            {"message_id": "n1", "channel_id": "777", "user_id": "1001", "user_name": "岡部",
+             "content": "桶子昨天又通宵"},
+            {"message_id": "n2", "channel_id": "777", "user_id": "2002", "user_name": "桶子",
+             "content": "哪有"},
+        ]
+        for m in messages:
+            await MemoryManager.save_message(m["message_id"], m["channel_id"], m["user_id"],
+                                             m["user_name"], m["content"])
+
+        # 模型把兩筆的 user_name 都回成「桶子」
+        ex = self._make_extractor([
+            {"user_id": "1001", "user_name": "桶子", "facts": ["愛吐槽"], "remove_facts": [],
+             "interaction_notes": "【核心性格】中二。", "favorability_delta": 0},
+            {"user_id": "2002", "user_name": "桶子", "facts": ["技術宅"], "remove_facts": [],
+             "interaction_notes": "【核心性格】駭客。", "favorability_delta": 0},
+        ])
+        await ex.extract_dialogue(messages, "777")
+
+        p1 = await MemoryManager.get_user_profile("1001")
+        p2 = await MemoryManager.get_user_profile("2002")
+        self.assertEqual(p1["user_name"], "岡部")   # 未被改成「桶子」
+        self.assertEqual(p2["user_name"], "桶子")
+        # 暱稱索引未塌縮
+        self.assertEqual(len(await MemoryManager.get_known_users_map()), 2)
+
+    async def test_single_extraction_no_double_counting(self):
+        """同一批訊息只提煉一次：好感度不加倍、事實熱度不灌水"""
+        await MemoryManager.update_user_profile("1001", "岡部", facts=[])
+        await MemoryManager.save_message("d1", "777", "1001", "岡部", "我帶了 Dr Pepper 給你")
+
+        prompts = []
+        ex = self._make_extractor([
+            {"user_id": "1001", "user_name": "岡部", "facts": ["喜歡喝 Dr Pepper"],
+             "remove_facts": [], "interaction_notes": "【核心性格】中二。", "favorability_delta": 2},
+        ], capture=prompts)
+        await ex.extract_dialogue(
+            [{"message_id": "d1", "channel_id": "777", "user_id": "1001",
+              "user_name": "岡部", "content": "我帶了 Dr Pepper 給你"}], "777")
+
+        p = await MemoryManager.get_user_profile("1001")
+        self.assertEqual(len(prompts), 1)                 # 只呼叫一次模型
+        self.assertEqual(p["favorability"], 32)           # 30 + 2，而非 +4
+        self.assertEqual(p["facts"][0]["hits"], 1)        # 未被誤判為重複確認而 +3
+
+        # 提煉成功後必須標記 extracted
+        self.assertEqual(await MemoryManager.get_unextracted_messages(), [])
+
+    async def test_mentioned_but_silent_user_is_whitelisted(self):
+        """被提及但未發言者也應在白名單內，跨使用者歸屬才成立"""
+        await MemoryManager.update_user_profile("1001", "岡部", facts=[])
+        await MemoryManager.update_user_profile("3003", "真由理", facts=[])
+
+        msgs = [{"message_id": "w1", "channel_id": "999", "user_id": "1001",
+                 "user_name": "岡部", "content": "真由理最近都在做 cosplay 服裝"}]
+        await MemoryManager.save_message("w1", "999", "1001", "岡部", msgs[0]["content"])
+
+        ex = self._make_extractor([
+            {"user_id": "3003", "user_name": "真由理", "facts": ["在做 cosplay 服裝"],
+             "remove_facts": [], "interaction_notes": "", "favorability_delta": 0},
+        ])
+        await ex.extract_dialogue(msgs, "999")
+
+        p = await MemoryManager.get_user_profile("3003")
+        self.assertIn("在做 cosplay 服裝", get_fact_texts(p["facts"]))
+
+    async def test_out_of_context_user_still_rejected(self):
+        """白名單放寬後，完全不在對話中的使用者仍必須被拒絕（防提示詞注入）"""
+        await MemoryManager.update_user_profile("1001", "岡部", facts=[])
+        await MemoryManager.update_user_profile("9999", "路人", facts=[])
+
+        msgs = [{"message_id": "x1", "channel_id": "777", "user_id": "1001",
+                 "user_name": "岡部", "content": "今天天氣真好"}]
+        await MemoryManager.save_message("x1", "777", "1001", "岡部", msgs[0]["content"])
+
+        ex = self._make_extractor([
+            {"user_id": "9999", "user_name": "路人", "facts": ["是笨蛋"], "remove_facts": [],
+             "interaction_notes": "", "favorability_delta": -2},
+        ])
+        await ex.extract_dialogue(msgs, "777")
+
+        p = await MemoryManager.get_user_profile("9999")
+        self.assertEqual(get_fact_texts(p["facts"]), [])
+        self.assertEqual(p["favorability"], 30)
+
+    async def test_failed_extraction_retried_by_sweeper(self):
+        """提煉失敗不標記 extracted，交由背景撿漏重試"""
+        await MemoryManager.update_user_profile("1001", "岡部", facts=[])
+        await MemoryManager.save_message("s1", "777", "1001", "岡部", "這則會失敗")
+
+        failing = MemoryExtractor()
+        failing.ai.generate_response = AsyncMock(side_effect=RuntimeError("模擬 API 失敗"))
+        await failing.extract_dialogue(
+            [{"message_id": "s1", "channel_id": "777", "user_id": "1001",
+              "user_name": "岡部", "content": "這則會失敗"}], "777")
+
+        pending = await MemoryManager.get_unextracted_messages()
+        self.assertEqual([m["message_id"] for m in pending], ["s1"])
+
+        ex = self._make_extractor([
+            {"user_id": "1001", "user_name": "岡部", "facts": ["撿漏成功"], "remove_facts": [],
+             "interaction_notes": "", "favorability_delta": 0},
+        ])
+        self.assertEqual(await ex.sweep_unextracted(), 1)
+        self.assertEqual(await MemoryManager.get_unextracted_messages(), [])
+
+        p = await MemoryManager.get_user_profile("1001")
+        self.assertIn("撿漏成功", get_fact_texts(p["facts"]))
+
 
 if __name__ == "__main__":
     unittest.main()
