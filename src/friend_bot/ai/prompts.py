@@ -51,6 +51,20 @@ def build_system_instruction() -> str:
 9. 不需要每次回覆都把對方的名字掛在嘴邊，保持自然聊天節奏。
 """
 
+def format_alias_hint(profile: Optional[Dict[str, Any]]) -> str:
+    """
+    將使用者的別名渲染成「（大家也叫他：桶子、阿桶）」這樣的提示片段。
+
+    別名是用來「解析出該載入誰的畫像」的，但若不把對應關係一併寫進 prompt，
+    模型只會看到 Discord 顯示名稱，得自己猜對話中的綽號指的是誰——人一多就不可靠，
+    猜錯時事實會被歸給錯的人或整個漏掉。因此凡是把某人放進 prompt 的地方，
+    都必須附上他的別名。
+    """
+    if not profile:
+        return ""
+    names = MemoryManager.alias_texts(profile.get("aliases"))
+    return f"（大家也叫他：{'、'.join(names)}）" if names else ""
+
 def format_history_timestamp(raw_ts: Any) -> str:
     """將歷史回憶訊息的 Unix timestamp 格式化為可讀日期；無法解析時回傳空字串"""
     if raw_ts in (None, ""):
@@ -73,7 +87,8 @@ def format_memory_context(
 
     # 1. 發言者個人長期畫像與好感度態度指引 (第 2 層)
     if user_profile:
-        profile_lines = [f"【主要發言者 {current_user_name} 的個人特徵記憶】:"]
+        speaker_alias = format_alias_hint(user_profile)
+        profile_lines = [f"【主要發言者 {current_user_name}{speaker_alias} 的個人特徵記憶】:"]
         
         # 好感度態度動態注入
         tier = user_profile.get("relationship_tier", "familiar")
@@ -102,7 +117,9 @@ def format_memory_context(
             fact_str = "、".join(fact_strings) if fact_strings else "尚無特定記錄"
             note_str = o_notes if o_notes else "尚無特別印象"
             
-            other_lines.append(f"- 用戶名稱: {o_name} (關係階級: {o_tier})")
+            other_lines.append(
+                f"- 用戶名稱: {o_name}{format_alias_hint(o_profile)} (關係階級: {o_tier})"
+            )
             if ENABLE_FAVORABILITY and o_tier in TIER_ATTITUDE_MAP:
                 other_lines.append(f"  • {TIER_ATTITUDE_MAP[o_tier]}")
             other_lines.append(f"  • 已知特徵: {fact_str}")
@@ -217,6 +234,7 @@ def build_multi_entity_extraction_prompt(
     speaker_facts = "、".join(MemoryManager.to_fact_texts(raw_sp_facts)) or "尚無"
     speaker_notes = speaker.get("interaction_notes", "") or "尚無"
     speaker_fav = speaker.get("favorability", 30)
+    speaker_alias = format_alias_hint(speaker)
 
     other_users_text = ""
     if other_users:
@@ -227,7 +245,7 @@ def build_multi_entity_extraction_prompt(
             raw_u_facts = u.get("facts", [])
             u_facts = "、".join(MemoryManager.to_fact_texts(raw_u_facts)) or "尚無"
             u_notes = u.get("interaction_notes", "") or "尚無"
-            lines.append(f"- 【{u_name}】(ID: {u_id}):\n  • 目前事實: {u_facts}\n  • 目前印象: {u_notes}")
+            lines.append(f"- 【{u_name}】{format_alias_hint(u)}(ID: {u_id}):\n  • 目前事實: {u_facts}\n  • 目前印象: {u_notes}")
         other_users_text = "\n".join(lines)
     else:
         other_users_text = "（本次無特定在場的其他群友畫像）"
@@ -238,7 +256,7 @@ def build_multi_entity_extraction_prompt(
 請分析發言者【{speaker_name}】在 Discord 中的最新發言記錄，並執行【多實體特徵歸屬提煉、好感度微調評估、事實自我更正與多維度深度印象生成】。
 
 【當前發言者 (Speaker)】:
-- 名稱: {speaker_name} (ID: {speaker_id})
+- 名稱: {speaker_name}{speaker_alias} (ID: {speaker_id})
 - 目前好感度: {speaker_fav}
 - 目前已記錄事實: {speaker_facts}
 - 目前已記錄互動印象: {speaker_notes}
@@ -312,7 +330,7 @@ def build_batch_dialogue_extraction_prompt(
         facts_str = "、".join(MemoryManager.to_fact_texts(raw_p_facts)) or "尚無"
         notes_str = p.get("interaction_notes", "") or "尚無"
         fav_val = p.get("favorability", 30)
-        profiles_text_list.append(f"- 【{u_name}】(ID: {u_id}, 目前好感: {fav_val}):\n  • 目前事實: {facts_str}\n  • 目前印象: {notes_str}")
+        profiles_text_list.append(f"- 【{u_name}】{format_alias_hint(p)}(ID: {u_id}, 目前好感: {fav_val}):\n  • 目前事實: {facts_str}\n  • 目前印象: {notes_str}")
 
     profiles_section = "\n".join(profiles_text_list) if profiles_text_list else "（目前尚無相關群友的歷史畫像記錄）"
 

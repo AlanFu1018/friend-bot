@@ -21,7 +21,9 @@ from src.friend_bot.ai.memory_extractor import MemoryExtractor
 from src.friend_bot.ai.prompts import (
     format_memory_context,
     build_burst_dialogue_prompt,
-    parse_burst_reply_response
+    parse_burst_reply_response,
+    build_multi_entity_extraction_prompt,
+    build_batch_dialogue_extraction_prompt
 )
 from src.friend_bot.bot.client import FriendBotClient
 from src.friend_bot.bot.commands import (
@@ -1385,6 +1387,52 @@ class TestFriendBotFeatures(unittest.IsolatedAsyncioTestCase):
 
         # 不在場者的整筆更新（含別名）被白名單拒絕
         self.assertEqual(await MemoryManager.get_user_aliases("7003"), [])
+
+    def test_alias_mapping_is_visible_to_the_model(self):
+        """
+        別名必須寫進 prompt。
+
+        別名只用於「解析出該載入誰的畫像」是不夠的——若 prompt 只顯示 Discord 顯示名稱，
+        模型得自己猜對話中的綽號指的是誰，猜錯時事實會被歸給錯的人或整個漏掉。
+        """
+        alias_rec = [{"alias": "桶子", "source": "command", "by": [],
+                      "channel_id": "", "message_id": "", "at": 0}]
+        others = [{
+            "user_id": "2002", "user_name": "daru_1024", "facts": ["常熬夜"],
+            "interaction_notes": "技術宅", "aliases": alias_rec,
+            "relationship_tier": "familiar"
+        }]
+        speaker = {"user_id": "1001", "user_name": "岡部", "facts": [],
+                   "interaction_notes": "", "favorability": 30, "aliases": []}
+
+        # 提煉端：單人引擎與多人引擎
+        single = build_multi_entity_extraction_prompt(speaker, others, ["桶子昨天買了新鍵盤"])
+        self.assertIn("daru_1024】（大家也叫他：桶子）", single)
+
+        batch = build_batch_dialogue_extraction_prompt(
+            [{"user_name": "岡部", "user_id": "1001", "content": "桶子買鍵盤"}], others)
+        self.assertIn("daru_1024】（大家也叫他：桶子）", batch)
+
+        # 回覆端：發言者本人與其他群友
+        context = format_memory_context(
+            current_user_name="岡部",
+            user_profile={"user_name": "岡部", "facts": [], "interaction_notes": "",
+                          "relationship_tier": "familiar",
+                          "aliases": [{"alias": "鳳凰院", "source": "command", "by": [],
+                                       "channel_id": "", "message_id": "", "at": 0}]},
+            deep_history=[], short_term_history=[], other_user_profiles=others
+        )
+        self.assertIn("岡部（大家也叫他：鳳凰院）", context)
+        self.assertIn("daru_1024（大家也叫他：桶子）", context)
+
+        # 沒有別名的人不應出現多餘的括號
+        no_alias = format_memory_context(
+            current_user_name="岡部",
+            user_profile={"user_name": "岡部", "facts": [], "interaction_notes": "",
+                          "relationship_tier": "familiar", "aliases": []},
+            deep_history=[], short_term_history=[]
+        )
+        self.assertNotIn("大家也叫他", no_alias)
 
 
 if __name__ == "__main__":
