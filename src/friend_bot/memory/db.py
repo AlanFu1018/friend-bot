@@ -10,7 +10,8 @@ logger = get_logger("database")
 # 資料庫 schema 版本（記錄於 SQLite 原生的 PRAGMA user_version）
 # 1 = messages_fts 改存 n-gram 切詞後的檢索字串，並移除從未寫入過的 channel_id / msg_id 欄位
 # 2 = 修復重複提煉造成的資料污染：回填被改錯的 user_name、重置被灌水的事實熱度 hits
-SCHEMA_VERSION = 2
+# 3 = 清除以「名字」而非 Discord 數字 ID 為主鍵的幽靈畫像（防注入白名單上線前的遺留）
+SCHEMA_VERSION = 3
 FTS_SCHEMA_VERSION = 1  # 保留舊名稱以相容既有引用
 
 # 重建索引時每批處理的訊息數量
@@ -178,6 +179,8 @@ async def _run_migrations(db) -> None:
             await _rebuild_fts_index(db)
         if current_version < 2:
             await _repair_extraction_pollution(db)
+        if current_version < 3:
+            await _cleanup_phantom_profiles(db)
     except Exception as e:
         logger.error(f"資料庫遷移失敗（版本維持 {current_version}，下次啟動將重試）: {e}", exc_info=True)
         return
@@ -242,6 +245,90 @@ async def _repair_extraction_pollution(db) -> None:
     logger.info(
         f"🔧 [遷移 v2] 已從 messages 回填 {renamed} 筆畫像的 user_name，"
         f"並將 {reset_facts} 條事實的熱度重置為 1。"
+    )
+
+async def _cleanup_phantom_profiles(db) -> None:
+    """
+    【遷移 v3】清除以「名字」而非 Discord 數字 ID 為主鍵的幽靈畫像。
+
+    成因：早期提煉時模型會把 `user_id` 欄位填成使用者名稱（而非 ID），舊版
+    `_safe_apply_updates` 因為該值是非空字串就直接當成主鍵，於是建立了一筆
+    `user_id = '代謝'` 這樣的畫像。這些資料早於防注入白名單（`allowed_uids`）上線，
+    白名單啟用後就不再更新——特徵是 favorability 停在預設值、facts 遠少於同名真人。
+
+    危害：`get_known_users_map()` 舊版遇到同名時是「後者覆蓋前者」，而 SELECT 沒有
+    ORDER BY，因此該名字有時會解析到幾乎空白的幽靈畫像、有時解析到真人，造成
+    「紅莉栖時而完全不記得某人」這種不定時的症狀。
+
+    處理：若該名字恰好對應到唯一一筆真實（數字 ID）畫像，先把幽靈的 facts 併入
+    該真人畫像（走 merge_facts，自動去重並套用否定推翻邏輯），再刪除幽靈列；
+    對應不唯一時則直接刪除，不猜。
+
+    此類資料已無法再產生：`allowed_uids` 全部來自 Discord（必為數字 ID），
+    模型輸出的非數字 ID 不可能通過白名單校驗。
+    """
+    from .memory_manager import MemoryManager
+
+    async with db.execute(
+        "SELECT user_id, user_name, facts FROM user_profiles"
+    ) as cursor:
+        rows = [dict(r) for r in await cursor.fetchall()]
+
+    phantoms = [r for r in rows if not str(r["user_id"]).strip().isdigit()]
+    if not phantoms:
+        return
+
+    # 名字 -> 真實（數字 ID）畫像清單
+    real_by_name: dict = {}
+    for r in rows:
+        uid = str(r["user_id"]).strip()
+        if uid.isdigit():
+            key = str(r["user_name"]).strip().lower()
+            real_by_name.setdefault(key, []).append(r)
+
+    merged_count = 0
+    orphan_count = 0
+
+    for ph in phantoms:
+        ph_uid = str(ph["user_id"])
+        name_key = str(ph["user_name"]).strip().lower()
+        targets = real_by_name.get(name_key, [])
+
+        if len(targets) == 1:
+            target = targets[0]
+            phantom_facts = MemoryManager.to_fact_texts(
+                MemoryManager.normalize_facts(ph.get("facts"))
+            )
+            if phantom_facts:
+                merged = MemoryManager.merge_facts(
+                    current_facts_raw=target.get("facts"),
+                    incoming_facts_raw=phantom_facts,
+                    remove_facts_raw=[]
+                )
+                await db.execute(
+                    "UPDATE user_profiles SET facts = ? WHERE user_id = ?",
+                    (json.dumps(merged, ensure_ascii=False), str(target["user_id"]))
+                )
+                # 後續若有同名幽靈，需以合併後的結果為基礎
+                target["facts"] = merged
+            merged_count += 1
+            logger.info(
+                f"🔧 [遷移 v3] 幽靈畫像 user_id={ph_uid!r} 的 {len(phantom_facts)} 條事實"
+                f"已併入真實使用者 [{target['user_name']} ({target['user_id']})]"
+            )
+        else:
+            orphan_count += 1
+            logger.warning(
+                f"🔧 [遷移 v3] 幽靈畫像 user_id={ph_uid!r} 找不到唯一對應的真實使用者"
+                f"（同名真人 {len(targets)} 位），直接刪除不做合併"
+            )
+
+        await db.execute("DELETE FROM user_profiles WHERE user_id = ?", (ph_uid,))
+
+    await db.commit()
+    logger.info(
+        f"✅ [遷移 v3] 已清除 {len(phantoms)} 筆幽靈畫像"
+        f"（{merged_count} 筆事實已併入真人，{orphan_count} 筆無對應直接刪除）。"
     )
 
 async def _rebuild_fts_index(db) -> None:

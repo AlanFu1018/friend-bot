@@ -1200,6 +1200,73 @@ class TestFriendBotFeatures(unittest.IsolatedAsyncioTestCase):
         # 第一次取代後，後兩次屬同極性的重複確認：1 -> 4 -> 7
         self.assertEqual(facts[0]["hits"], 7)
 
+    # ==================== 23. 幽靈畫像清理（遷移 v3） ====================
+    async def _insert_profile(self, user_id, user_name, fact_pairs, favorability=30):
+        """測試輔助：直接寫入一筆畫像（可指定非數字 user_id 以模擬幽靈）"""
+        facts_json = json.dumps(
+            [{"text": t, "hits": h, "created_at": 0, "last_used_at": 0} for t, h in fact_pairs],
+            ensure_ascii=False
+        )
+        async with get_db_connection() as db:
+            await db.execute(
+                "INSERT OR REPLACE INTO user_profiles "
+                "(user_id, user_name, facts, interaction_notes, favorability) VALUES (?,?,?,?,?)",
+                (user_id, user_name, facts_json, "", favorability)
+            )
+            await db.commit()
+
+    async def test_phantom_profile_merged_into_real_user(self):
+        """user_id 為名字的幽靈畫像應併入同名真人後刪除"""
+        from src.friend_bot.memory.db import _cleanup_phantom_profiles
+
+        await self._insert_profile("844811392979697675", "代謝", [("熱愛生物學", 3)], favorability=49)
+        await self._insert_profile("代謝", "代謝", [("喜歡打排球", 1)])   # 幽靈
+
+        async with get_db_connection() as db:
+            await _cleanup_phantom_profiles(db)
+
+        self.assertIsNone(await MemoryManager.get_user_profile("代謝"))   # 幽靈已刪除
+
+        real = await MemoryManager.get_user_profile("844811392979697675")
+        self.assertEqual(real["favorability"], 49)                        # 真人資料未受影響
+        self.assertIn("熱愛生物學", get_fact_texts(real["facts"]))
+        self.assertIn("喜歡打排球", get_fact_texts(real["facts"]))        # 幽靈事實已併入
+
+        # 同名碰撞消失，該名字可正常解析到真人
+        self.assertEqual((await MemoryManager.get_known_users_map()).get("代謝"),
+                         "844811392979697675")
+
+    async def test_phantom_without_unique_match_is_deleted_not_guessed(self):
+        """找不到唯一對應真人的幽靈直接刪除，不可猜測歸屬"""
+        from src.friend_bot.memory.db import _cleanup_phantom_profiles
+
+        await self._insert_profile("111111111111111111", "重複名", [("甲的事實", 1)])
+        await self._insert_profile("222222222222222222", "重複名", [("乙的事實", 1)])
+        await self._insert_profile("重複名", "重複名", [("來歷不明的事實", 1)])   # 幽靈
+
+        async with get_db_connection() as db:
+            await _cleanup_phantom_profiles(db)
+
+        self.assertIsNone(await MemoryManager.get_user_profile("重複名"))
+        # 兩位真人都不該被塞入來歷不明的事實
+        for uid in ("111111111111111111", "222222222222222222"):
+            texts = get_fact_texts((await MemoryManager.get_user_profile(uid))["facts"])
+            self.assertNotIn("來歷不明的事實", texts)
+
+    async def test_real_profiles_are_never_touched_by_cleanup(self):
+        """沒有幽靈時清理不得動到任何資料"""
+        from src.friend_bot.memory.db import _cleanup_phantom_profiles
+
+        await self._insert_profile("555738929584930868", "感應與運動", [("愛打球", 5)], favorability=48)
+
+        async with get_db_connection() as db:
+            await _cleanup_phantom_profiles(db)
+
+        p = await MemoryManager.get_user_profile("555738929584930868")
+        self.assertEqual(p["favorability"], 48)
+        self.assertEqual(get_fact_texts(p["facts"]), ["愛打球"])
+        self.assertEqual(p["facts"][0]["hits"], 5)
+
 
 if __name__ == "__main__":
     unittest.main()
