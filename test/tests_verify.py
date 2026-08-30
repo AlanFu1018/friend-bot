@@ -398,10 +398,30 @@ class TestFriendBotFeatures(unittest.IsolatedAsyncioTestCase):
         self.assertIn("入了 Realforce 鍵盤", get_fact_texts(prof_daru["facts"]))
 
     # ==================== 8. 好感度進展與每日上限防刷保護測試 ====================
+    def _fav_response(self, delta: int, fact: str, notes: str) -> str:
+        """測試輔助：產生一份帶指定好感度增量的提煉回應（含 ``` 圍欄以一併驗證解析）"""
+        return "```json\n" + json.dumps({
+            "updates": [{
+                "user_id": "user_fav_tester",
+                "user_name": "實驗助手",
+                "facts": [fact],
+                "remove_facts": [],
+                "interaction_notes": notes,
+                "favorability_delta": delta
+            }]
+        }, ensure_ascii=False) + "\n```"
+
     async def test_favorability_progression_and_daily_cap(self):
+        """
+        好感度累加與每日增量上限防刷。
+
+        每日上限在此固定為 5 並直接 patch 模組層級常數，讓測試不受 config.yaml 影響——
+        否則調高設定值會讓三次共 9 分的增量永遠碰不到上限，這個測試就會在無聲中
+        失去它唯一要驗證的東西。
+        """
         user_id = "user_fav_tester"
         user_name = "實驗助手"
-        
+
         await MemoryManager.update_user_profile(
             user_id=user_id,
             user_name=user_name,
@@ -412,86 +432,35 @@ class TestFriendBotFeatures(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(init_p["favorability"], 30)
         self.assertEqual(init_p["relationship_tier"], "familiar")
 
-        mock_gemini_response_1 = """```json
-{
-  "updates": [
-    {
-      "user_id": "user_fav_tester",
-      "user_name": "實驗助手",
-      "facts": ["請紅莉棲喝了一瓶Dr Pepper"],
-      "remove_facts": [],
-      "interaction_notes": "互動極佳",
-      "favorability_delta": 3
-    }
-  ]
-}
-```"""
-        mock_gemini_client = MagicMock()
-        mock_gemini_client.generate_response = AsyncMock(return_value=mock_gemini_response_1)
+        extractor = MemoryExtractor()
 
-        extractor = MemoryExtractor(gemini_client=mock_gemini_client)
-        await extractor.extract_and_update(
-            user_id=user_id,
-            user_name=user_name,
-            recent_messages=["送你一瓶冰涼的 Dr Pepper！"]
-        )
+        async def run(delta: int, fact: str, notes: str):
+            # 每次都重新指派到 extractor.ai 上；只重新綁定區域變數不會改到已建立的
+            # extractor，那正是這個測試先前失效的原因（三次呼叫其實都在重播第一份回應）。
+            extractor.ai.generate_response = AsyncMock(
+                return_value=self._fav_response(delta, fact, notes)
+            )
+            await extractor.extract_and_update(
+                user_id=user_id, user_name=user_name, recent_messages=[fact]
+            )
+            return await MemoryManager.get_user_profile(user_id)
 
-        p1 = await MemoryManager.get_user_profile(user_id)
-        self.assertEqual(p1["favorability"], 33)
-        self.assertEqual(p1["daily_favorability_gain"], 3)
-        self.assertEqual(p1["relationship_tier"], "familiar")
+        with patch("src.friend_bot.ai.memory_extractor.DAILY_GAIN_LIMIT", 5):
+            # 第 1 次：+3 全額入帳
+            p1 = await run(3, "請紅莉棲喝了一瓶Dr Pepper", "互動極佳")
+            self.assertEqual(p1["favorability"], 33)
+            self.assertEqual(p1["daily_favorability_gain"], 3)
+            self.assertEqual(p1["relationship_tier"], "familiar")
 
-        mock_gemini_response_2 = """```json
-{
-  "updates": [
-    {
-      "user_id": "user_fav_tester",
-      "user_name": "實驗助手",
-      "facts": ["認真研讀神經科學論文"],
-      "remove_facts": [],
-      "interaction_notes": "認真討論學術",
-      "favorability_delta": 4
-    }
-  ]
-}
-```"""
-        mock_gemini_client = MagicMock()
-        mock_gemini_client.generate_response = AsyncMock(return_value=mock_gemini_response_2)
-        await extractor.extract_and_update(
-            user_id=user_id,
-            user_name=user_name,
-            recent_messages=["這篇關於時間記憶的論文好精彩！"]
-        )
+            # 第 2 次：模型給 +4，但當日只剩 2 分額度
+            p2 = await run(4, "認真研讀神經科學論文", "認真討論學術")
+            self.assertEqual(p2["favorability"], 35)
+            self.assertEqual(p2["daily_favorability_gain"], 5)
 
-        p2 = await MemoryManager.get_user_profile(user_id)
-        self.assertEqual(p2["favorability"], 35)  # 33 + 2 (每日上限 5 分生效)
-        self.assertEqual(p2["daily_favorability_gain"], 5)
-
-        mock_gemini_response_3 = """```json
-{
-  "updates": [
-    {
-      "user_id": "user_fav_tester",
-      "user_name": "實驗助手",
-      "facts": [],
-      "remove_facts": [],
-      "interaction_notes": "繼續稱讚紅莉棲",
-      "favorability_delta": 2
-    }
-  ]
-}
-```"""
-        mock_gemini_client = MagicMock()
-        mock_gemini_client.generate_response = AsyncMock(return_value=mock_gemini_response_3)
-        await extractor.extract_and_update(
-            user_id=user_id,
-            user_name=user_name,
-            recent_messages=["紅莉棲真是天才！"]
-        )
-
-        p3 = await MemoryManager.get_user_profile(user_id)
-        self.assertEqual(p3["favorability"], 35)
-        self.assertEqual(p3["daily_favorability_gain"], 5)
+            # 第 3 次：額度已滿，完全不再增加
+            p3 = await run(2, "稱讚紅莉棲的推論", "繼續稱讚紅莉棲")
+            self.assertEqual(p3["favorability"], 35)
+            self.assertEqual(p3["daily_favorability_gain"], 5)
 
     # ==================== 9. 好感度階級轉換與 Prompt 動態注入測試 ====================
     def test_relationship_tier_computation_and_attitude_injection(self):
@@ -1478,6 +1447,82 @@ class TestFriendBotFeatures(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(MemoryManager.should_remove_fact("喜歡台北", "拉麵"))
         self.assertFalse(MemoryManager.should_remove_fact("喜歡台北", ""))
         self.assertFalse(MemoryManager.should_remove_fact("", "台北"))
+
+    # ==================== 26. 監聽佇列則數上限 (P2-5) ====================
+    def _listen_msg(self, idx: int, channel_id: str = "999") -> dict:
+        return {
+            "message_id": f"L{idx}", "channel_id": channel_id, "user_id": "1001",
+            "user_name": "岡部", "content": f"第 {idx} 則訊息", "has_image": False
+        }
+
+    async def test_listen_queue_flushes_when_message_cap_reached(self):
+        """累積滿上限即立即提煉，不再等待靜默"""
+        extractor = MemoryExtractor()
+        flushed = []
+
+        async def fake_extract(messages, channel_id="", **kwargs):
+            flushed.append((channel_id, [m["message_id"] for m in messages]))
+
+        extractor.extract_dialogue = fake_extract
+
+        # 防抖設為極長，確保觸發的必然是則數上限而非靜默
+        for i in range(3):
+            await extractor.add_listen_message(
+                "999", self._listen_msg(i), debounce_seconds=999, max_queue_messages=3
+            )
+        await asyncio.sleep(0.05)
+
+        self.assertEqual(flushed, [("999", ["L0", "L1", "L2"])])
+        self.assertNotIn("999", extractor._listen_queue)   # 佇列已清空，不會重複提煉
+
+    async def test_listen_queue_below_cap_waits_for_debounce(self):
+        """未達上限時維持原本的防抖行為，不應提早觸發"""
+        extractor = MemoryExtractor()
+        flushed = []
+
+        async def fake_extract(messages, channel_id="", **kwargs):
+            flushed.append(channel_id)
+
+        extractor.extract_dialogue = fake_extract
+
+        for i in range(2):
+            await extractor.add_listen_message(
+                "999", self._listen_msg(i), debounce_seconds=999, max_queue_messages=3
+            )
+        await asyncio.sleep(0.05)
+
+        self.assertEqual(flushed, [])
+        self.assertEqual(len(extractor._listen_queue["999"]), 2)
+
+        # 收尾：取消尚在等待的防抖任務，避免污染其他測試
+        for task in extractor._debounce_tasks.values():
+            task.cancel()
+
+    async def test_listen_queue_cap_is_per_channel(self):
+        """則數上限以頻道為單位計算，不同頻道互不影響"""
+        extractor = MemoryExtractor()
+        flushed = []
+
+        async def fake_extract(messages, channel_id="", **kwargs):
+            flushed.append(channel_id)
+
+        extractor.extract_dialogue = fake_extract
+
+        for i in range(2):
+            await extractor.add_listen_message(
+                "AAA", self._listen_msg(i, "AAA"), debounce_seconds=999, max_queue_messages=3
+            )
+        for i in range(3):
+            await extractor.add_listen_message(
+                "BBB", self._listen_msg(i, "BBB"), debounce_seconds=999, max_queue_messages=3
+            )
+        await asyncio.sleep(0.05)
+
+        self.assertEqual(flushed, ["BBB"])                 # 只有滿載的頻道被觸發
+        self.assertEqual(len(extractor._listen_queue["AAA"]), 2)
+
+        for task in extractor._debounce_tasks.values():
+            task.cancel()
 
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@ from src.friend_bot.core.config import (
     DAILY_GAIN_LIMIT,
     DAILY_LOSS_LIMIT,
     LISTEN_DEBOUNCE_SECONDS,
+    LISTEN_MAX_QUEUE_MESSAGES,
     EXTRACTION_SWEEP_INTERVAL_SECONDS,
     ENABLE_ALIAS_LEARNING
 )
@@ -476,9 +477,20 @@ class MemoryExtractor:
         self,
         channel_id: str,
         message_data: Dict[str, Any],
-        debounce_seconds: float = LISTEN_DEBOUNCE_SECONDS
+        debounce_seconds: float = LISTEN_DEBOUNCE_SECONDS,
+        max_queue_messages: int = LISTEN_MAX_QUEUE_MESSAGES
     ) -> None:
-        """監聽頻道訊息防抖收集器（防抖秒數見 config.yaml 的 listen_debounce_seconds）"""
+        """
+        監聽頻道訊息防抖收集器（參數見 config.yaml 的 listen_debounce_seconds
+        與 listen_max_queue_messages）。
+
+        兩種觸發條件，滿足其一即提煉：
+        - 靜默滿 debounce_seconds（每來一則新訊息就重設計時）
+        - 佇列累積滿 max_queue_messages 則立即觸發
+
+        則數上限是防抖機制的保險：熱絡頻道若持續有人發言（間隔都短於防抖秒數），
+        計時器會被無限重設，佇列將無上限成長並在最後產生超大 prompt。
+        """
         if not ENABLE_AUTO_MEMORY_EXTRACTION:
             return
 
@@ -489,6 +501,16 @@ class MemoryExtractor:
 
             if channel_id in self._debounce_tasks and not self._debounce_tasks[channel_id].done():
                 self._debounce_tasks[channel_id].cancel()
+
+            # 滿載：取消防抖、立即取出整批提煉（提煉本身較慢，丟到背景避免佔住鎖）
+            if len(self._listen_queue[channel_id]) >= max_queue_messages:
+                pending = self._listen_queue.pop(channel_id, [])
+                logger.info(
+                    f"📥 [監聽佇列滿載] 頻道 [{channel_id}] 累積 {len(pending)} 則訊息，"
+                    f"不再等待靜默，立即提煉"
+                )
+                asyncio.create_task(self.extract_dialogue(pending, channel_id))
+                return
 
             self._debounce_tasks[channel_id] = asyncio.create_task(
                 self._debounced_process_listen_channel(channel_id, debounce_seconds)
