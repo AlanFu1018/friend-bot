@@ -24,7 +24,8 @@
 > 資料修復（`user_name` 回填 + `hits` 重置）以 `PRAGMA user_version = 2` 的啟動遷移執行。
 > 實作細節見本文件末的「修復記錄」。
 >
-> **尚未處理**：P2-1 的中文子字串誤命中（無解，需分詞）、P2-3（產品取捨，經評估暫不處理）、P3（需 embedding）。
+> **尚未處理**：P2-1 的中文子字串誤命中（無解，需分詞）、P2-3（產品取捨，經評估暫不處理）、
+> P3（需 embedding）、P4-1／P4-2（2026-08-30 對照設計文件時新發現）。
 > P2-4 與 P2-6 已分別被 P2-1 的排序工作與背景撿漏機制順帶解決。
 
 ---
@@ -411,6 +412,51 @@ display_name，B 就完全無法被識別——這是 P1-2 修復後浮現的真
 `/kurisu-alias`（add／remove／list）。呼叫者身分取自 `interaction.user`，不信任訊息內容，
 因此無法透過聊天內容偽造。代他人操作需 `manage_guild` 權限。`list` 會顯示每個別名的
 來源、時間與提出者，供稽核。
+
+---
+
+## 🟠 P4-1：`interaction_notes` 完全覆寫，無任何保護
+
+**位置**：`ai/memory_extractor.py` 的 `_safe_apply_updates`
+
+```python
+merged_notes = str(notes).strip() if (notes and str(notes).strip()) else cur_notes
+```
+
+模型每次提煉都**整份取代**互動印象，只有在回傳空字串時才保留舊值。
+
+這與 `memory_sys_design.md` §7 的核心哲學直接矛盾——那套「絕不洗白」的保護只涵蓋 `facts`，不涵蓋 `interaction_notes`：
+
+| 記憶類型 | 保護 |
+| :--- | :--- |
+| `facts` | 增量聯集 + `hits` 熱度 + 否定推翻 + 刪除門檻（四層）|
+| `interaction_notes` | **無** |
+
+互動印象承載的是【核心性格】這種累積最久、最難重建的內容，一次壞的提煉就永久消失。
+
+**緩解因素**：prompt 有明確要求「參考歷史已有記錄請參考保留並適度微調深化」，且模型在 prompt 中看得到目前的印象，正常情況會演進而非清空。因此這是**潛在的單點失效**而非持續發生的問題。
+
+**可能的修法**：比照事實的做法保留舊值直到新值明顯更完整（例如長度門檻），或把三個維度（核心性格／社交關係／近期動態）拆開分別合併——【核心性格】應該穩定，【近期動態】本來就該滾動更新。
+
+---
+
+## 🟡 P4-2：好感度扣分無跨日累積限制
+
+**位置**：`memory_manager.py` 的 `calculate_favorability_update`
+
+```python
+if delta > 0:
+    available_gain = max(0, gain_limit - daily_gain)   # 有累積追蹤
+    actual_delta = min(delta, available_gain)
+elif delta < 0:
+    actual_delta = max(delta, -loss_limit)             # 只有單次夾限
+```
+
+加分受 `daily_favorability_gain` 追蹤並以 15 分/日為上限；扣分只有「單次夾限 `daily_loss_limit`（100）」，而模型的 delta 範圍是 -2 ~ +2，**等於完全沒有限制**。
+
+後果是不對稱的：連續幾次誤判可以讓關係階級從 `cherished` 快速掉到 `stranger`，而回升受每日 15 分上限約束，要好幾天。
+
+此項與 [`doc/improv.md`](improv.md) 6.1 記錄的「每日增減上限明顯不對稱」是同一件事，當時判斷需與產品邏輯確認是否為刻意設計。
 
 ---
 
