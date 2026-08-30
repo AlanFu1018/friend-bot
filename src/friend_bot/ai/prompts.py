@@ -1,7 +1,10 @@
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
 import re
-from src.friend_bot.core.config import SYSTEM_PROMPT, BOT_NAME, ENABLE_FAVORABILITY
+from src.friend_bot.core.config import (
+    SYSTEM_PROMPT, BOT_NAME, ENABLE_FAVORABILITY,
+    ENABLE_MUSIC_SUGGESTION, MUSIC_PLAY_COMMAND
+)
 from src.friend_bot.memory.memory_manager import MemoryManager
 
 # 4 階 Tier 傲嬌態度動態指令對照表
@@ -19,9 +22,20 @@ def get_current_time_str() -> str:
     weekday_str = weekdays[now.weekday()]
     return now.strftime(f"%Y年%m月%d日 %H:%M:%S ({weekday_str})")
 
+MUSIC_SUGGESTION_RULE = """10. 【音樂推薦】：
+   - 上下文若出現【語音頻道現況】，代表那些人此刻正和發言者同在語音頻道裡。
+   - 當對話自然聊到音樂、心情或氣氛時，你可以推薦一首歌，並**結合在場者已知的喜好**挑選。
+   - 推薦時附上可直接複製執行的指令，格式為：`{play_command} 歌名 - 演出者`
+   - 你自己無法播放音樂，指令要由群友複製去執行——用自然的語氣帶出來，別像客服念稿。
+   - 不要每次都推薦；只在話題自然帶到時才做。"""
+
 def build_system_instruction() -> str:
     """建立系統人格與核心規則指令"""
     current_time = get_current_time_str()
+    music_rule = (
+        MUSIC_SUGGESTION_RULE.format(play_command=MUSIC_PLAY_COMMAND)
+        if ENABLE_MUSIC_SUGGESTION else ""
+    )
     return f"""{SYSTEM_PROMPT.strip()}
 
 [基本資訊]
@@ -49,7 +63,7 @@ def build_system_instruction() -> str:
 7. 【當前時間日期】：若被問及「現在幾點」、「今天幾號」、「星期幾」等時間問題，請直接根據 [基本資訊] 中的【當前系統真實時間】精準回答。
 8. 若參考了該用戶的長期記憶或歷史回憶，請自然融入，切勿生硬複誦「我從資料庫查到你喜歡...」。
 9. 不需要每次回覆都把對方的名字掛在嘴邊，保持自然聊天節奏。
-"""
+{music_rule}"""
 
 def format_alias_hint(profile: Optional[Dict[str, Any]]) -> str:
     """
@@ -64,6 +78,35 @@ def format_alias_hint(profile: Optional[Dict[str, Any]]) -> str:
         return ""
     names = MemoryManager.alias_texts(profile.get("aliases"))
     return f"（大家也叫他：{'、'.join(names)}）" if names else ""
+
+def format_voice_channel_context(voice_context: Optional[Dict[str, Any]]) -> str:
+    """
+    渲染【語音頻道現況】區塊，讓模型知道此刻誰和發言人同在語音頻道裡。
+
+    voice_context 格式：{"channel_name": str, "members": [{"user_id","user_name","aliases"}]}
+    無語音資訊（發言人不在語音頻道）時回傳空字串，該區塊整塊不會進入 prompt。
+
+    只有「發言人自己所在的語音頻道」會被帶入——發言人不在語音時一律不注入，
+    不去猜「人數最多的頻道」。這讓推薦對象的定義沒有歧義：發言人與同頻道的其他人。
+    """
+    if not voice_context:
+        return ""
+
+    members = voice_context.get("members") or []
+    if not members:
+        return ""
+
+    names = []
+    for m in members:
+        name = str(m.get("user_name") or "群友")
+        alias_hint = format_alias_hint(m)
+        names.append(f"{name}{alias_hint}")
+
+    channel_name = voice_context.get("channel_name") or "語音頻道"
+    return (
+        "【語音頻道現況】:\n"
+        f"- 頻道「{channel_name}」目前有 {len(members)} 人：" + "、".join(names)
+    )
 
 def format_history_timestamp(raw_ts: Any) -> str:
     """將歷史回憶訊息的 Unix timestamp 格式化為可讀日期；無法解析時回傳空字串"""
@@ -80,7 +123,8 @@ def format_memory_context(
     deep_history: List[Dict[str, Any]],
     short_term_history: List[Dict[str, Any]],
     calendar_summary: str = "",
-    other_user_profiles: Optional[List[Dict[str, Any]]] = None
+    other_user_profiles: Optional[List[Dict[str, Any]]] = None,
+    voice_context: Optional[Dict[str, Any]] = None
 ) -> str:
     """將三層記憶、多人畫像、好感度態度與行事曆排程組合成結構化的 Context 提示文字"""
     context_parts = []
@@ -126,11 +170,16 @@ def format_memory_context(
             other_lines.append(f"  • 互動印象: {note_str}")
         context_parts.append("\n".join(other_lines))
 
-    # 3. 用戶已登記的行事曆與排程 (Calendar Schedules)
+    # 3. 語音頻道現況（僅在發言人身處語音頻道時才有內容）
+    voice_block = format_voice_channel_context(voice_context)
+    if voice_block:
+        context_parts.append(voice_block)
+
+    # 4. 用戶已登記的行事曆與排程 (Calendar Schedules)
     if calendar_summary and calendar_summary.strip():
         context_parts.append(calendar_summary.strip())
 
-    # 4. 歷史深度回憶 (第 3 層)
+    # 5. 歷史深度回憶 (第 3 層)
     if deep_history:
         history_lines = ["【過去的歷史話題回憶 (供參考，若相關可自然提及)】:"]
         for item in deep_history:
@@ -142,7 +191,7 @@ def format_memory_context(
             history_lines.append(f"- {prefix}{u_name}: {content}")
         context_parts.append("\n".join(history_lines))
 
-    # 5. 近期頻道對話紀錄 (第 1 層)
+    # 6. 近期頻道對話紀錄 (第 1 層)
     if short_term_history:
         chat_lines = ["【近期頻道對話紀錄】:"]
         for msg in short_term_history:

@@ -25,6 +25,7 @@
 | **聯網搜尋** | DuckDuckGo + Jina Reader、Tool Calling | [`web_search.md`](web_search.md) |
 | **行事曆與鬧鐘** | 兩套定時系統、時間解析、Webhook 推送 | [`calendar_and_alarm.md`](calendar_and_alarm.md) |
 | **情緒顏文字** | `[emotion:xxx]` 標籤渲染與防重複 | [`emotion_kaomoji.md`](emotion_kaomoji.md) |
+| **語音與音樂推薦** | 語音頻道感知、結合在場者喜好推薦歌曲 | [`music_suggestion.md`](music_suggestion.md) |
 | **Slash 指令** | 10 個指令、Mixin 註冊架構、權限模型 | [`commands.md`](commands.md) |
 | **設定與基礎建設** | config 層級、logger、DB schema 與遷移 | [`configuration.md`](configuration.md) |
 
@@ -152,4 +153,4 @@ main.py
 python test/tests_verify.py
 ```
 
-62 項自動化測試，涵蓋時間解析、記憶檢索、跨使用者歸屬、事實保護、別名校驗、Burst 聚合、指令註冊、顏文字渲染等。測試直接以指令稿執行（`test/` 沒有 `__init__.py`，不能用 `python -m unittest`）。
+68 項自動化測試，涵蓋時間解析、記憶檢索、跨使用者歸屬、事實保護、別名校驗、語音在場解析、Burst 聚合、指令註冊、顏文字渲染等。測試直接以指令稿執行（`test/` 沒有 `__init__.py`，不能用 `python -m unittest`）。

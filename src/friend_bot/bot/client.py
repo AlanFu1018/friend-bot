@@ -23,6 +23,8 @@ from src.friend_bot.core.config import (
     FACTS_OTHERS_MAX_TOTAL,
     FACTS_OTHERS_HEAT_LIMIT,
     FACTS_OTHERS_RECENT_LIMIT,
+    ENABLE_MUSIC_SUGGESTION,
+    VOICE_MEMBERS_MAX,
 )
 from src.friend_bot.core.logger import get_logger
 from src.friend_bot.ai.gemini_client import GeminiClient
@@ -163,6 +165,54 @@ class FriendBotClient(
                 # 傳統單則回覆模式
                 await self._handle_buffered_chat(channel=message.channel, messages=[message], is_burst=False)
 
+    async def _resolve_voice_context(self, author) -> Optional[dict]:
+        """
+        取得發言人所在語音頻道的在場者資訊。發言人不在任何語音頻道時回傳 None。
+
+        **刻意只認發言人自己所在的頻道**，不去猜「人數最多的語音頻道」。這讓推薦對象
+        的定義沒有歧義（發言人與同頻道的其他人必然重疊），也符合專案一貫的
+        「寧可找不到也不猜」原則。代價是「在文字頻道幫語音裡的人點歌」不會觸發。
+
+        成員來源用 `channel.voice_states` 而非 `channel.members`：後者的實作是
+        `guild.get_member(uid)`，**快取沒有就靜默跳過**，而 members 是特權 intent
+        且目前關閉——bot 重啟後若有人已在語音頻道中，`members` 可能回傳空清單。
+        `voice_states` 直接來自語音狀態快取，不依賴成員快取。
+
+        名稱解析兩段式：Discord 快取優先（權威且即時），退回我們自己的畫像記錄。
+        """
+        if not ENABLE_MUSIC_SUGGESTION:
+            return None
+
+        voice_state = getattr(author, "voice", None)
+        channel = getattr(voice_state, "channel", None)
+        if channel is None:
+            return None
+
+        member_ids = [str(uid) for uid in getattr(channel, "voice_states", {}).keys()]
+        if not member_ids:
+            return None
+
+        # 名稱與別名：先查 Discord 快取，缺的再用自己的畫像補
+        profiles = await MemoryManager.get_user_profiles_batch(member_ids)
+        guild = getattr(channel, "guild", None)
+
+        members = []
+        for uid in member_ids[:VOICE_MEMBERS_MAX]:
+            profile = profiles.get(uid) or {}
+            cached = guild.get_member(int(uid)) if (guild and uid.isdigit()) else None
+            name = (
+                getattr(cached, "display_name", None)
+                or profile.get("user_name")
+                or "群友"
+            )
+            members.append({
+                "user_id": uid,
+                "user_name": name,
+                "aliases": profile.get("aliases", [])
+            })
+
+        return {"channel_name": getattr(channel, "name", "語音頻道"), "members": members}
+
     async def _on_burst_flush(self, channel_id: str, messages: List[discord.Message], is_burst: bool):
         """Burst 緩衝區到期或滿載時的回呼"""
         if not messages:
@@ -213,13 +263,20 @@ class FriendBotClient(
                 for m in messages for u in m.mentions
             ]
 
-            # 多人記憶檢索 (A + B + C 混合方案)
+            # 語音頻道現況（發言人不在語音頻道時為 None，整塊不進 prompt）
+            voice_context = await self._resolve_voice_context(latest_msg.author)
+            voice_member_ids = (
+                [m["user_id"] for m in voice_context["members"]] if voice_context else []
+            )
+
+            # 多人記憶檢索 (A + B + D + C 混合方案)
             current_user_profile, other_user_profiles = await MemoryManager.resolve_multi_user_profiles(
                 current_user_id=latest_user_id,
                 content=combined_content,
                 short_term_history=short_term,
                 max_others=4,
-                explicit_mentions=explicit_mentions
+                explicit_mentions=explicit_mentions,
+                voice_member_ids=voice_member_ids
             )
 
             # 三軌混合事實檢索 (Heat + RAG + Recent)
@@ -267,7 +324,8 @@ class FriendBotClient(
                 deep_history=deep_history,
                 short_term_history=short_term,
                 calendar_summary=calendar_summary,
-                other_user_profiles=other_user_profiles
+                other_user_profiles=other_user_profiles,
+                voice_context=voice_context
             )
 
             # 根據是否為 Burst 模式組裝 Prompt

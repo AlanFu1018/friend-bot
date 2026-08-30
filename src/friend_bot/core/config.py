@@ -149,6 +149,12 @@ FACTS_RAG_HIT_COOLDOWN_SECONDS: int = int(_facts_rag_cfg.get("rag_hit_cooldown_s
 FACTS_EXTRACTION_REAFFIRM_BONUS: int = int(_facts_rag_cfg.get("extraction_reaffirm_bonus", 3))
 FACTS_RAG_HIT_BONUS: int = int(_facts_rag_cfg.get("rag_hit_bonus", 1))
 
+# 7.5 語音頻道感知與音樂推薦 (Music Suggestion) 設定
+_music_cfg = _yaml_config.get("music", {})
+ENABLE_MUSIC_SUGGESTION: bool = bool(_music_cfg.get("enable_music_suggestion", True))
+MUSIC_PLAY_COMMAND: str = str(_music_cfg.get("play_command", "/play")).strip() or "/play"
+VOICE_MEMBERS_MAX: int = int(_music_cfg.get("voice_members_max", 5))
+
 # 8. 好感度與人際進展 (Favorability) 設定
 _fav_cfg = _yaml_config.get("favorability", {})
 ENABLE_FAVORABILITY: bool = bool(_fav_cfg.get("enable_favorability", True))

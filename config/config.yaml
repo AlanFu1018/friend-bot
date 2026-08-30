@@ -146,6 +146,19 @@ memory:
   # 本地 SQLite 資料庫儲存路徑（永久保存所有訊息與記憶）
   db_path: "data/friend_bot.db"
 
+# 語音頻道感知與音樂推薦 (Music Suggestion) 設定
+music:
+  # 是否啟用語音頻道感知與音樂推薦。
+  # 注意：Discord API 不允許 bot 呼叫另一個 bot 的 Slash 指令，因此這裡只會「建議」——
+  # 紅莉栖推薦歌曲並附上可直接複製的指令，實際播放仍需群友自己執行。
+  enable_music_suggestion: true
+
+  # 推薦時輸出的指令前綴。換用其他音樂 bot 時只要改這裡，不需改程式碼。
+  play_command: "/play"
+
+  # 最多帶入幾位語音在場者的喜好（與其他群友共用 max_others 配額）
+  voice_members_max: 5
+
 # 好感度與人際進展 (Favorability & Progression) 設定
 favorability:
   # 是否開啟動態好感度與人際關係進展系統

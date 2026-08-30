@@ -23,8 +23,11 @@ from src.friend_bot.ai.prompts import (
     build_burst_dialogue_prompt,
     parse_burst_reply_response,
     build_multi_entity_extraction_prompt,
-    build_batch_dialogue_extraction_prompt
+    build_batch_dialogue_extraction_prompt,
+    format_voice_channel_context,
+    build_system_instruction
 )
+from src.friend_bot.core.config import MUSIC_PLAY_COMMAND
 from src.friend_bot.bot.client import FriendBotClient
 from src.friend_bot.bot.commands import (
     HelpCommandsMixin,
@@ -1522,6 +1525,126 @@ class TestFriendBotFeatures(unittest.IsolatedAsyncioTestCase):
 
         for task in extractor._debounce_tasks.values():
             task.cancel()
+
+    # ==================== 27. 語音頻道感知與音樂推薦 ====================
+    def _fake_author(self, channel_name=None, voice_state_ids=None, cached_names=None):
+        """測試輔助：模擬一位可能身處語音頻道的發言者"""
+        author = MagicMock()
+        if channel_name is None:
+            author.voice = None
+            return author
+
+        guild = MagicMock()
+        cached = cached_names or {}
+
+        def get_member(uid):
+            name = cached.get(str(uid))
+            if name is None:
+                return None            # 模擬成員快取沒有該人（members intent 關閉）
+            m = MagicMock()
+            m.display_name = name
+            return m
+
+        guild.get_member = get_member
+
+        channel = MagicMock()
+        channel.name = channel_name
+        channel.guild = guild
+        # voice_states 是 {user_id: VoiceState}，不依賴成員快取
+        channel.voice_states = {int(uid): MagicMock() for uid in (voice_state_ids or [])}
+
+        author.voice = MagicMock()
+        author.voice.channel = channel
+        return author
+
+    def test_voice_context_renders_members_and_aliases(self):
+        """【語音頻道現況】需列出在場者並帶上別名；無語音時整塊不進 prompt"""
+        alias_rec = [{"alias": "桶子", "source": "command", "by": [],
+                      "channel_id": "", "message_id": "", "at": 0}]
+        ctx = {"channel_name": "一般", "members": [
+            {"user_id": "1", "user_name": "岡部", "aliases": []},
+            {"user_id": "2", "user_name": "daru_1024", "aliases": alias_rec},
+        ]}
+        block = format_voice_channel_context(ctx)
+        self.assertIn("頻道「一般」目前有 2 人", block)
+        self.assertIn("daru_1024（大家也叫他：桶子）", block)
+
+        self.assertEqual(format_voice_channel_context(None), "")
+        self.assertEqual(format_voice_channel_context({"channel_name": "一般", "members": []}), "")
+
+    async def test_voice_context_skipped_when_speaker_not_in_voice(self):
+        """發言人不在語音頻道時完全不注入語音資訊"""
+        client = FriendBotClient(intents=discord.Intents.default())
+        author = self._fake_author(channel_name=None)
+        self.assertIsNone(await client._resolve_voice_context(author))
+
+    async def test_voice_member_names_fall_back_to_profile(self):
+        """成員快取沒有該人時（members intent 關閉），名稱退回自己的畫像記錄"""
+        await MemoryManager.update_user_profile("8001", "岡部", facts=[])
+        await MemoryManager.update_user_profile("8002", "daru_1024", facts=[])
+
+        client = FriendBotClient(intents=discord.Intents.default())
+        author = self._fake_author(
+            channel_name="一般",
+            voice_state_ids=["8001", "8002"],
+            cached_names={"8001": "岡部(新暱稱)"}   # 8002 不在快取中
+        )
+        ctx = await client._resolve_voice_context(author)
+
+        names = {m["user_id"]: m["user_name"] for m in ctx["members"]}
+        self.assertEqual(names["8001"], "岡部(新暱稱)")   # Discord 快取優先
+        self.assertEqual(names["8002"], "daru_1024")      # 退回畫像記錄
+        self.assertEqual(ctx["channel_name"], "一般")
+
+    async def test_voice_members_ranked_above_recent_speakers(self):
+        """維度優先序：@提及 > 名稱/別名 > 語音在場 > 文字近期"""
+        for uid, name in (("8001", "岡部"), ("8002", "桶子"),
+                          ("8003", "真由理"), ("8004", "路人")):
+            await MemoryManager.update_user_profile(uid, name, facts=[])
+
+        _, others = await MemoryManager.resolve_multi_user_profiles(
+            current_user_id="9000",
+            content="桶子你看",                                    # 維度 B
+            explicit_mentions=[{"user_id": "8003", "user_name": "真由理"}],  # 維度 A
+            voice_member_ids=["8001"],                            # 維度 D
+            short_term_history=[{"user_id": "8004", "is_bot": False}],       # 維度 C
+            max_others=4
+        )
+        self.assertEqual([o["user_id"] for o in others],
+                         ["8003", "8002", "8001", "8004"])
+
+    async def test_voice_presence_never_grants_write_access(self):
+        """
+        關鍵迴歸：語音在場只影響「讀取」，不得讓事實被寫給該使用者。
+
+        提煉端的白名單走 resolve_mentioned_user_ids（只含 A+B），與畫像檢索
+        刻意是不同函式。若日後有人把兩者「統一」，維度 C/D 會取得寫入權限，
+        誤判就會從「一次回覆變差」升級成「永久記錯人」。
+        """
+        await MemoryManager.update_user_profile("8001", "岡部", facts=[])
+        await MemoryManager.update_user_profile("8002", "桶子", facts=[])   # 在語音但未發言
+
+        msgs = [{"message_id": "v1", "channel_id": "777", "user_id": "8001",
+                 "user_name": "岡部", "content": "今天想聽點音樂"}]
+        await MemoryManager.save_message("v1", "777", "8001", "岡部", msgs[0]["content"])
+
+        ex = self._make_extractor([
+            {"user_id": "8002", "user_name": "桶子", "facts": ["喜歡搖滾樂"],
+             "remove_facts": [], "interaction_notes": "", "favorability_delta": 2},
+        ])
+        await ex.extract_dialogue(msgs, "777")
+
+        p = await MemoryManager.get_user_profile("8002")
+        self.assertEqual(get_fact_texts(p["facts"]), [])   # 未發言、未被提及 -> 拒絕寫入
+        self.assertEqual(p["favorability"], 30)
+
+    def test_music_rule_present_in_system_instruction(self):
+        """系統指令需含音樂推薦規則，且指令前綴取自設定"""
+        si = build_system_instruction()
+        self.assertIn("10. 【音樂推薦】", si)
+        self.assertIn(f"{MUSIC_PLAY_COMMAND} 歌名", si)
+        # 明確告知模型自己無法播放，避免它承諾做不到的事
+        self.assertIn("你自己無法播放音樂", si)
 
 
 if __name__ == "__main__":

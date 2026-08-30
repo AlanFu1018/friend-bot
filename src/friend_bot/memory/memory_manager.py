@@ -987,9 +987,27 @@ class MemoryManager:
         content: str,
         short_term_history: Optional[List[Dict[str, Any]]] = None,
         max_others: int = 4,
-        explicit_mentions: Optional[List[Dict[str, str]]] = None
+        explicit_mentions: Optional[List[Dict[str, str]]] = None,
+        voice_member_ids: Optional[List[str]] = None
     ) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
-        """多人多維畫像檢索解析器"""
+        """
+        多人多維畫像檢索解析器。四個來源依優先序合併後截斷至 max_others：
+
+            A. @提及        ← resolve_mentioned_user_ids
+            B. 名稱／別名   ← resolve_mentioned_user_ids
+            D. 語音頻道在場者（voice_member_ids）
+            C. 近期文字發言者（short_term_history）
+
+        維度 D 排在 C 之前，是因為「此刻和發言人同在一個語音頻道」比「15 則訊息前
+        在文字頻道講過話」更能代表在場。
+
+        ⚠️ **本函式只影響「讀取」——它決定哪些人的畫像會被放進 prompt，
+        絕不決定「事實可以被寫給誰」。** 提煉端的白名單走的是
+        `resolve_mentioned_user_ids()`（只含 A+B），刻意不經過這裡：
+        「某人剛好在語音頻道／剛好講過話」不構成「可以把事實永久記到他頭上」的理由。
+        若日後有人想把兩邊「統一」成同一個函式，會讓維度 C 與 D 取得寫入權限，
+        使誤判從「一次回覆變差」升級為「永久記錯人」。
+        """
         current_profile = await MemoryManager.get_user_profile(current_user_id)
 
         # 維度 A + B（與提煉端白名單共用同一份解析邏輯）
@@ -998,6 +1016,12 @@ class MemoryManager:
             exclude_uids={str(current_user_id)},
             explicit_mentions=explicit_mentions
         )
+
+        # 維度 D：語音頻道在場者（唯讀，見上方 docstring）
+        for uid in (voice_member_ids or []):
+            uid = str(uid)
+            if uid and uid != str(current_user_id) and uid not in target_other_uids:
+                target_other_uids.append(uid)
 
         # 維度 C：近期頻道發言者
         if short_term_history:
