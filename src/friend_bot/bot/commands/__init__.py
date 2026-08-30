@@ -4,7 +4,6 @@ from .profile import ProfileCommandsMixin, TIER_NAME_MAP, render_favorability_ba
 from .alias import AliasCommandsMixin
 from .alarm import AlarmCommandsMixin
 from .calendar import CalendarCommandsMixin
-from .general import GeneralCommandsMixin
 
 __all__ = [
     "HelpCommandsMixin",
@@ -13,7 +12,6 @@ __all__ = [
     "AliasCommandsMixin",
     "AlarmCommandsMixin",
     "CalendarCommandsMixin",
-    "GeneralCommandsMixin",
     "TIER_NAME_MAP",
     "render_favorability_bar"
 ]

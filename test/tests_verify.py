@@ -32,7 +32,6 @@ from src.friend_bot.bot.commands import (
     ProfileCommandsMixin,
     AlarmCommandsMixin,
     CalendarCommandsMixin,
-    GeneralCommandsMixin
 )
 
 
