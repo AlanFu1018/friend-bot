@@ -2,10 +2,11 @@
 
 > 本文件是**照著 `src/` 程式碼逐行核對**的執行期真實流程說明，記錄「一則 Discord 訊息進來後，各層記憶如何被組合成送往 Gemini 的 prompt」。
 >
-> **與另外兩份文件的定位差異**：
-> - [`doc/memory_sys_design.md`](memory_sys_design.md)：三層記憶架構的**設計意圖**與願景。
-> - [`doc/rag_mem.md`](rag_mem.md)：三軌 RAG 與熱度加權的**設計方案**（§8 附有一份 prompt 架構草圖）。
-> - **本文件**：實際跑起來是什麼樣子。兩者有出入時，以本文件為準；已知落差整理於 [§5](#5-附錄與現有設計文件的落差)。
+> **與其他文件的定位差異**：
+> - [`doc/architecture.md`](architecture.md)：全系統入口與模組索引。
+> - [`doc/memory_sys_design.md`](memory_sys_design.md)：記憶系統的**架構與設計理由**。
+> - [`doc/mem_sys_bugs.md`](mem_sys_bugs.md)：缺陷清單、實測證據與修復記錄。
+> - **本文件**：執行期實際跑起來是什麼樣子（含逐行行號）。與設計文件有出入時以本文件為準；已知落差整理於 [§5](#5-附錄與現有設計文件的落差)。
 
 ---
 
@@ -46,7 +47,7 @@ on_message  (bot/client.py:107-155)
 | :-- | :--- | :--- | :--- |
 | 1 | `client.py:176-187` | 本批訊息全部 `save_message(extracted=0)` | 先落地，後面的短期記憶才讀得到 |
 | 2 | — | （原本此處有「回覆前 JIT 提煉」迴圈，已廢除，見 §4） | — |
-| 3 | `client.py:196` | `get_short_term_context(channel_id)` 取最近 15 則 | 含步驟 1 剛寫入的訊息 |
+| 3 | `client.py:196` | `get_short_term_context(channel_id)` 取最近 N 則 | 含步驟 1 剛寫入的訊息 |
 | 4 | `client.py:200` | 本批訊息合併為 `combined_content` | 後續**所有**檢索共用的 query 串 |
 | 5 | `client.py:203-208` | `resolve_multi_user_profiles(max_others=4)` | A+B+C 解析發言者 + 關係人 |
 | 6 | `client.py:212-235` | `filter_facts_three_tracks` 砍事實數量 | 發言者 8 條／每位他人 3 條 |
@@ -89,17 +90,17 @@ contents.append(prompt)                            # ◀── 通道 B：記憶
 | 其他群友畫像 | 同上（A/B/C 三維度） | `user_profiles` | 最多 4 人，每人 3 條事實 | 三軌：熱度 1 + RAG 1 + 最新 1 |
 | 行事曆 | `get_user_schedule_summary` (`bot/utils/calendar/calendar_manager.py:149`) | `calendar_events` | 未來 14 天、最多 10 筆 | 依時間排序 |
 | 深度回憶 | `recall_deep_history` (`memory/memory_manager.py`) | `messages_fts` | `history_recall_limit` = 4 | FTS5 粗篩 + 最長共同詞彙門檻（見 §2.3） |
-| 短期對話 | `get_short_term_context` (`memory/memory_manager.py:431`) | `messages` | `short_term_history_limit` = 15 | 依時間倒序取出後反轉為正序 |
+| 短期對話 | `get_short_term_context` (`memory/memory_manager.py:431`) | `messages` | `short_term_history_limit`（目前 30）| 依時間倒序取出後反轉為正序 |
 
 ### 2.1 其他群友的 A + B + C 三維度解析
 
 `memory_manager.py:518-544`，**依序**加入候選、去重、最後 `[:max_others]` 硬截斷：
 
-- **維度 A（`:520-524`）**：正規表達式 `<@!?(\d+)>` 解析 Discord 原生 @提及。
-- **維度 B（`:526-532`）**：載入 `get_known_users_map()`（全站 `{暱稱小寫: user_id}`），若暱稱長度 >= 2 且以子字串出現在訊息中即命中。
-- **維度 C（`:534-542`）**：掃描短期記憶（由新到舊），把非 bot、非發言者本人的發言者視為「在場」。
+- **維度 A**：取自呼叫端傳入的 `explicit_mentions`（來源是 `discord.Message.mentions`）。**不能對內容做 `<@\d+>` 正則**——`clean_content` 已把提及轉寫成 `@顯示名稱`，正則永遠不會命中。原正則僅保留為 fallback，處理 Slash 指令參數中的原始標記。
+- **維度 B**：`get_known_users_map()` 涵蓋**顯示名稱與別名**，且同名對應多人時整組排除（不猜）。ASCII 暱稱以詞邊界比對，停用詞與過短英數暱稱不參與。
+- **維度 C**：掃描短期記憶（由新到舊），把非 bot、非發言者本人的發言者視為「在場」。**維度 C 只影響讀取，不進提煉白名單。**
 
-> 因為是「先到先得再截斷」而非依相關性排序，維度 C 硬湊進來的人可能佔掉本該留給 @提及對象的配額。
+> 回傳順序即優先序：@提及 → 較長暱稱 → 較短暱稱 → 在場者，因此截斷配額時 @提及必定優先保留。
 
 ### 2.2 三軌事實檢索
 
@@ -309,7 +310,7 @@ SQLite FTS5 的預設 `unicode61` 分詞器會把一整串連續中文視為**�
 
 以下皆為**核對程式碼後確認的實際狀況**，本文件僅記錄，不在此次改動：
 
-1. **`doc/rag_mem.md` §8 的架構圖與實際渲染有出入**：該圖把 System Instruction 畫成 prompt 的第一區塊，實際上它走的是 `GenerateContentConfig.system_instruction` 參數，不在 prompt 字串內；區塊標題措辭也與 `format_memory_context` 的實際輸出不完全一致。
+1. ~~**`doc/rag_mem.md` §8 的架構圖與實際渲染有出入**~~ — 該文件已於 2026-08-30 刪除（內容已併入 [`memory_sys_design.md`](memory_sys_design.md)）。其架構圖曾把 System Instruction 畫成 prompt 的第一區塊，實際上它走的是 `GenerateContentConfig.system_instruction` 參數，不在 prompt 字串內。
 
 2. ~~**深度回憶的日期恆為空字串**~~ — **已修復**。原因是 dict key 不存在：`prompts.py` 讀 `item.get("created_at", "")`，但 `recall_deep_history` 的 SELECT 只回傳 `m.timestamp`，`.get()` 找不到 key 便靜靜回傳預設空字串（不報錯，故長期未被發現）。現改為格式化 `timestamp`（Discord 上實際發言時間，而非 `messages.created_at` 這個寫入資料庫的時間）。
 

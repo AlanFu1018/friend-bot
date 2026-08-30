@@ -77,7 +77,7 @@ gemini:
 # 三層全記憶系統設定
 memory:
   # 第 1 層 (短期記憶)：送入 Prompt 的最近頻道對話訊息數量
-  short_term_history_limit: 15
+  short_term_history_limit: 30
   
   # 第 2 層 (長期畫像)：是否開啟背景自動分析對話並提取/更新用戶特徵（含純監聽頻道）
   enable_auto_memory_extraction: true
@@ -91,7 +91,7 @@ memory:
   # 這是防抖機制的保險——熱絡頻道若持續有人發言（間隔都短於防抖秒數），
   # 計時器會被無限重設，佇列將無上限成長並在最後產生超大 prompt。
   # 若要調大 listen_debounce_seconds，建議一併確認此上限是否合適。
-  listen_max_queue_messages: 15
+  listen_max_queue_messages: 30
 
   # 背景撿漏間隔秒數：定期掃描並重試「提煉失敗」或「重啟導致監聽佇列遺失」的殘留訊息
   # 正常情況下各路徑提煉完就會標記完成，這裡通常無事可做，因此不需要太頻繁。
@@ -158,4 +158,4 @@ favorability:
   daily_gain_limit: 15
 
   # 單一用戶「每日好感度扣分上限」（避免因少數誤判過度扣分）
-  daily_loss_limit: 100
+  daily_loss_limit: 20
