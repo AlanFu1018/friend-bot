@@ -1,5 +1,6 @@
 import asyncio
 import json
+import math
 import re
 import time
 from datetime import datetime
@@ -43,6 +44,12 @@ NON_NEGATION_WORDS: Tuple[str, ...] = (
     "不錯", "不過", "不但", "不僅", "不只", "不外乎", "差不多",
     "對不起", "了不起", "不好意思", "不得了", "要不然", "捨不得"
 )
+
+# remove_facts 的最低引述門檻：當「事實包含刪除詞」時，刪除詞必須佔該事實一定比例
+# 才准刪除。刪除是不可逆操作，因此門檻刻意偏保守——寧可留下過時事實（它是可見的，
+# 日後仍可再更正），也不要誤刪一條仍然成立的事實（無法復原）。
+FACT_REMOVAL_MIN_RATIO = 0.4
+FACT_REMOVAL_MIN_LENGTH = 2
 
 # 英文否定標記
 NEGATION_PATTERN_EN = re.compile(
@@ -211,6 +218,40 @@ class MemoryManager:
         return bool(NEGATION_PATTERN_EN.search(cleaned))
 
     @staticmethod
+    def should_remove_fact(fact_text: str, remove_term: str) -> bool:
+        """
+        判斷模型給的 remove_facts 詞是否足以刪除某一條既有事實。
+
+        原本是無門檻的雙向子字串比對，導致籠統的刪除詞會連帶清掉無關事實：
+        `remove_facts=['台中']` 會把「以前在台中唸書」「喜歡台中的太陽餅」一起刪光，
+        即使它們與這次的搬家更正毫無關係。這是**不可逆**的資料損失。
+
+        三種情況分開處理：
+        - 完全相同 → 刪除（無疑義）
+        - 刪除詞**包含**整條事實 → 刪除（模型引述得比事實更完整，識別明確）
+        - 事實**包含**刪除詞 → 危險方向，刪除詞需達最低引述比例才准刪
+
+        不能改成「只接受完整引述」：`prompts.py` 的範例本身就教模型給部分引述
+        （事實「住在台中市」對應 `remove_facts: ["住在台中"]`），改嚴會讓正常更正失效。
+        """
+        fact = (fact_text or "").strip().lower()
+        term = (remove_term or "").strip().lower()
+        if not fact or not term:
+            return False
+
+        if fact == term or fact in term:
+            return True
+
+        if term in fact:
+            required = max(
+                FACT_REMOVAL_MIN_LENGTH,
+                math.ceil(FACT_REMOVAL_MIN_RATIO * len(fact))
+            )
+            return len(term) >= required
+
+        return False
+
+    @staticmethod
     def topic_key(text: str) -> str:
         """
         取出一段事實「去掉否定詞後的主題」，用於判斷兩條事實是否在談同一件事。
@@ -281,10 +322,26 @@ class MemoryManager:
         ] if isinstance(remove_facts_raw, list) else []
 
         if remove_clean:
-            filtered_cur_facts = [
-                f for f in cur_facts
-                if not any(rf in f["text"].lower() or f["text"].lower() in rf for rf in remove_clean)
-            ]
+            filtered_cur_facts = []
+            applied_terms: Set[str] = set()
+            for f in cur_facts:
+                hit = next(
+                    (rf for rf in remove_clean if MemoryManager.should_remove_fact(f["text"], rf)),
+                    None
+                )
+                if hit is None:
+                    filtered_cur_facts.append(f)
+                else:
+                    applied_terms.add(hit)
+                    logger.info(f"🗑️ [事實移除] 依刪除詞「{hit}」移除事實：{f['text']!r}")
+
+            # 未命中任何事實的刪除詞多半是因為引述過於籠統而被門檻擋下，
+            # 記錄下來以便追查「為什麼這次更正沒有生效」。
+            for rf in remove_clean:
+                if rf not in applied_terms:
+                    logger.debug(
+                        f"🗑️ [刪除詞未套用]「{rf}」未達最低引述門檻或找不到對應事實，已略過"
+                    )
         else:
             filtered_cur_facts = list(cur_facts)
 

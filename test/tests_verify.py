@@ -1434,6 +1434,51 @@ class TestFriendBotFeatures(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("大家也叫他", no_alias)
 
+    # ==================== 25. remove_facts 最低引述門檻 (P2-2) ====================
+    def test_broad_remove_term_does_not_wipe_unrelated_facts(self):
+        """核心迴歸：籠統的刪除詞不得連帶清掉無關事實（不可逆的資料損失）"""
+        facts = [
+            {"text": "以前在台中唸書", "hits": 5, "created_at": 0, "last_used_at": 0},
+            {"text": "住在台中市", "hits": 2, "created_at": 0, "last_used_at": 0},
+            {"text": "喜歡台中的太陽餅", "hits": 8, "created_at": 0, "last_used_at": 0},
+        ]
+        merged = MemoryManager.merge_facts(facts, ["搬到台北了"], ["台中"])
+        texts = get_fact_texts(merged)
+
+        # 與居住無關的事實必須保留（修復前三條會全滅）
+        self.assertIn("以前在台中唸書", texts)
+        self.assertIn("喜歡台中的太陽餅", texts)
+        self.assertIn("搬到台北了", texts)
+        # 熱度不受影響
+        self.assertEqual(next(f for f in merged if f["text"] == "喜歡台中的太陽餅")["hits"], 8)
+
+    def test_partial_quote_removal_still_works(self):
+        """部分引述仍須生效——prompts.py 的範例本身就教模型這樣給"""
+        facts = [{"text": "住在台中市", "hits": 2, "created_at": 0, "last_used_at": 0}]
+        merged = MemoryManager.merge_facts(facts, ["目前定居在台北市"], ["住在台中"])
+        self.assertEqual(get_fact_texts(merged), ["目前定居在台北市"])
+
+    def test_should_remove_fact_decision_table(self):
+        """逐項確認三種情況的判定邊界"""
+        # 完全相同 / 刪除詞包含事實 -> 一律刪除
+        self.assertTrue(MemoryManager.should_remove_fact("住在台中市", "住在台中市"))
+        self.assertTrue(MemoryManager.should_remove_fact("住在台中市", "他以前住在台中市，現在搬走了"))
+
+        # 事實包含刪除詞 -> 依引述比例判定
+        self.assertTrue(MemoryManager.should_remove_fact("住在台中市", "住在台中"))
+        self.assertTrue(MemoryManager.should_remove_fact("自稱狂氣科學家", "狂氣科學家"))
+        self.assertTrue(MemoryManager.should_remove_fact("最近常熬夜", "熬夜"))
+
+        # 佔比過低 -> 保留
+        self.assertFalse(MemoryManager.should_remove_fact("喜歡台中的太陽餅", "台中"))
+        self.assertFalse(MemoryManager.should_remove_fact("以前在台中唸書", "台中"))
+        self.assertFalse(MemoryManager.should_remove_fact("每天早上都要喝一杯咖啡", "咖啡"))
+
+        # 無關 / 空值
+        self.assertFalse(MemoryManager.should_remove_fact("喜歡台北", "拉麵"))
+        self.assertFalse(MemoryManager.should_remove_fact("喜歡台北", ""))
+        self.assertFalse(MemoryManager.should_remove_fact("", "台北"))
+
 
 if __name__ == "__main__":
     unittest.main()
