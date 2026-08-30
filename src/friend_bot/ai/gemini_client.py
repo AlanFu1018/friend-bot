@@ -15,7 +15,7 @@ from src.friend_bot.core.config import (
 from src.friend_bot.core.logger import get_logger
 from .prompts import build_system_instruction
 from src.friend_bot.ai.tools.web_search_tool import perform_web_search
-from src.friend_bot.bot.utils.emotion import EmotionReplacer
+from src.friend_bot.core.emotion import EmotionReplacer
 
 logger = get_logger("gemini")
 

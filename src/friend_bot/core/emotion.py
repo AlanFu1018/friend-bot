@@ -3,12 +3,11 @@ import random
 from pathlib import Path
 from typing import Dict, List, Optional
 import yaml
-from src.friend_bot.core.logger import get_logger
+from .logger import get_logger
+# 專案根目錄由 config 統一提供，避免此檔案移動位置時 parents[N] 的深度假設失效
+from .config import BASE_DIR
 
 logger = get_logger("emotion")
-
-# 專案根目錄
-BASE_DIR = Path(__file__).resolve().parents[4]
 
 DEFAULT_KAOMOJI_MAP: Dict[str, List[str]] = {
     "tsundere": [

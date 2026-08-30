@@ -171,22 +171,27 @@ python main.py [選項]
 
 ## 7. 已知問題
 
-### 循環匯入
+### ~~循環匯入~~ ✅ 已修復（2026-08-30）
 
-`ai/gemini_client.py` 匯入 `bot/utils/emotion.py`（顏文字渲染），而 `bot/__init__.py` 匯入 `client.py`，後者又匯入 `ai/gemini_client.py`。
+`ai/gemini_client.py` 原本匯入 `bot/utils/emotion.py`，造成 `ai` 反向依賴 `bot`：
 
-結果是**匯入順序敏感**：直接 `from src.friend_bot.ai.memory_extractor import MemoryExtractor` 會失敗，必須先載入 `bot` 套件下的任一子模組。`test/tests_verify.py` 恰好因為先匯入 `bot.utils.alarm` 而正常運作，但這是巧合而非設計。
-
-```python
-# 可行
-import src.friend_bot.bot.utils.emotion
-from src.friend_bot.ai.memory_extractor import MemoryExtractor
-
-# 失敗：ImportError: cannot import name 'GeminiClient' from partially initialized module
-from src.friend_bot.ai.memory_extractor import MemoryExtractor
+```
+ai/__init__ → gemini_client → bot/utils/emotion → bot/__init__ → client → ai/gemini_client
+                                                                             ↑ 還沒執行完
 ```
 
-根因是層級倒置——`ai` 不該依賴 `bot`。乾淨的做法是把 `emotion.py` 移到 `core/` 或 `ai/`。
+後果是**匯入順序敏感**——直接 `from src.friend_bot.ai.memory_extractor import ...` 會拋
+`ImportError: cannot import name 'GeminiClient' from partially initialized module`，
+必須先載入 `bot` 套件下的任一子模組才行。`test/tests_verify.py` 恰好因為先匯入
+`bot.utils.alarm` 而正常運作，但那是巧合而非設計——調整測試檔的 import 順序就會整份掛掉。
+
+**修法**：`emotion.py` 移至 `core/`。它是純文字處理（把 `[emotion:xxx]` 換成顏文字），
+與 Discord 完全無關，本來就不該放在 `bot/` 底下。依賴方向恢復單向 `bot → ai → memory → core`。
+
+搬移時另有一個陷阱：`emotion.py` 原本以 `Path(__file__).resolve().parents[4]` 推算專案
+根目錄，那是「在 `bot/utils/` 下」的深度。移到 `core/` 後應為 `parents[3]`，漏改會讓
+`kaomoji.yaml` 找不到而**靜默退回內建預設**（見 [`emotion_kaomoji.md`](emotion_kaomoji.md)
+的「沒有失敗訊號」）。現改為 `from .config import BASE_DIR`，深度假設從此只有一處。
 
 ### 每次操作都開新的資料庫連線
 

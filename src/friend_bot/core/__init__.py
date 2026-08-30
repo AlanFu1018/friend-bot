@@ -25,6 +25,7 @@ from .config import (
     SYSTEM_PROMPT
 )
 from .logger import setup_logger, get_logger
+from .emotion import EmotionReplacer
 
 __all__ = [
     "DISCORD_TOKEN",
@@ -52,5 +53,6 @@ __all__ = [
     "BOT_NAME",
     "SYSTEM_PROMPT",
     "setup_logger",
-    "get_logger"
+    "get_logger",
+    "EmotionReplacer"
 ]

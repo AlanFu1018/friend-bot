@@ -92,6 +92,7 @@
 ```
 src/friend_bot/
 ├── core/          config.py（設定層級）、logger.py（彩色 + 輪替檔案）
+│                  emotion.py（顏文字渲染，純文字處理不依賴 Discord）
 ├── memory/        db.py（schema 與遷移）、memory_manager.py（三層記憶核心）
 ├── ai/            gemini_client.py（SDK 封裝 + Tool Calling）
 │                  prompts.py（所有 prompt 組裝）
@@ -99,10 +100,14 @@ src/friend_bot/
 │                  tools/web_search_tool.py
 └── bot/           client.py（主流程）、handlers.py（圖片下載、訊息切分）
     ├── commands/  Slash 指令 Mixin（help／search／profile／alias／alarm／calendar）
-    └── utils/     burst/（多人聚合）、alarm/、calendar/、emotion.py
+    └── utils/     burst/（多人聚合）、alarm/、calendar/
 ```
 
-各層的依賴方向是 `bot → ai → memory → core`，唯一的例外是 `ai/gemini_client.py` 匯入 `bot/utils/emotion.py`（顏文字渲染），這造成了一個循環匯入——需先載入 `bot` 套件下的任一子模組才能匯入 `ai`（見 [`configuration.md`](configuration.md#已知問題)）。
+各層的依賴方向是**嚴格單向**的 `bot → ai → memory → core`，沒有例外。任何一層都可以被單獨匯入。
+
+> 這在 2026-08-30 之前並非如此：`ai/gemini_client.py` 曾匯入 `bot/utils/emotion.py`，形成
+> `ai → bot → ai` 的環路，使匯入順序變得敏感。`emotion.py` 已移至 `core/`（見
+> [`configuration.md`](configuration.md)）。新增跨層匯入時請維持這個方向。
 
 ---
 

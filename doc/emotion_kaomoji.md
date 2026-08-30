@@ -23,7 +23,7 @@
 
 ## 2. 渲染流程
 
-`EmotionReplacer.replace_emotion_tags()`（`bot/utils/emotion.py`）在 `GeminiClient.generate_response()` **回傳前**執行，因此所有走 Gemini 的輸出都會被渲染——包括對話回覆與鬧鐘提醒台詞。
+`EmotionReplacer.replace_emotion_tags()`（`core/emotion.py`）在 `GeminiClient.generate_response()` **回傳前**執行，因此所有走 Gemini 的輸出都會被渲染——包括對話回覆與鬧鐘提醒台詞。
 
 ```
 正則比對 [emotion:類別]        # \[emotion:([a-zA-Z0-9_\-]+)\]，大小寫不敏感

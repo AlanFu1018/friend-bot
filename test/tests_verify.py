@@ -16,7 +16,7 @@ from src.friend_bot.memory import MemoryManager, init_db, get_db_connection
 from src.friend_bot.bot.utils.alarm import AlarmManager, parse_alarm_time
 from src.friend_bot.bot.utils.calendar import CalendarManager, parse_calendar_time
 from src.friend_bot.bot.utils.burst import BurstBufferManager
-from src.friend_bot.bot.utils.emotion import EmotionReplacer
+from src.friend_bot.core.emotion import EmotionReplacer
 from src.friend_bot.ai.memory_extractor import MemoryExtractor
 from src.friend_bot.ai.prompts import (
     format_memory_context,
