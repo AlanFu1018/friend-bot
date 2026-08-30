@@ -47,6 +47,7 @@ from src.friend_bot.bot.commands import (
     HelpCommandsMixin,
     SearchCommandsMixin,
     ProfileCommandsMixin,
+    AliasCommandsMixin,
     AlarmCommandsMixin,
     CalendarCommandsMixin
 )
@@ -58,6 +59,7 @@ class FriendBotClient(
     HelpCommandsMixin,
     SearchCommandsMixin,
     ProfileCommandsMixin,
+    AliasCommandsMixin,
     AlarmCommandsMixin,
     CalendarCommandsMixin,
     discord.Client
@@ -83,6 +85,7 @@ class FriendBotClient(
         self.register_help_commands()
         self.register_search_commands()
         self.register_profile_commands()
+        self.register_alias_commands()
         self.register_alarm_commands()
         self.register_calendar_commands()
 

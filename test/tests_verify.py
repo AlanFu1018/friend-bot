@@ -1267,6 +1267,125 @@ class TestFriendBotFeatures(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(get_fact_texts(p["facts"]), ["愛打球"])
         self.assertEqual(p["facts"][0]["hits"], 5)
 
+    # ==================== 24. 別名系統 (Alias) ====================
+    async def test_alias_add_list_remove(self):
+        """別名基本流程：新增後可被名稱比對命中，移除後失效"""
+        await MemoryManager.update_user_profile("7001", "daru_1024", facts=[])
+
+        ok, _ = await MemoryManager.add_alias("7001", "桶子", source="command", by=["7001"])
+        self.assertTrue(ok)
+
+        # 別名進入名稱索引，可解析出該使用者
+        self.assertEqual((await MemoryManager.get_known_users_map()).get("桶子"), "7001")
+        self.assertEqual(await MemoryManager.resolve_mentioned_user_ids("桶子今天又通宵"), ["7001"])
+
+        # 來源記錄可稽核
+        aliases = await MemoryManager.get_user_aliases("7001")
+        self.assertEqual(aliases[0]["alias"], "桶子")
+        self.assertEqual(aliases[0]["source"], "command")
+        self.assertEqual(aliases[0]["by"], ["7001"])
+
+        ok, _ = await MemoryManager.remove_alias("7001", "桶子")
+        self.assertTrue(ok)
+        self.assertEqual(await MemoryManager.resolve_mentioned_user_ids("桶子今天又通宵"), [])
+
+    async def test_alias_rejects_impersonation_and_bad_names(self):
+        """別名的四道校驗：碰撞、重複、低鑑別度、自身顯示名稱"""
+        await MemoryManager.update_user_profile("7001", "岡部", facts=[])
+        await MemoryManager.update_user_profile("7002", "桶子", facts=[])
+
+        # 1. 不得使用他人的顯示名稱（這道擋掉冒名）
+        ok, reason = await MemoryManager.add_alias("7001", "桶子")
+        self.assertFalse(ok)
+        self.assertIn("已被其他使用者使用", reason)
+
+        # 2. 不得使用他人的既有別名
+        await MemoryManager.add_alias("7002", "阿桶")
+        ok, _ = await MemoryManager.add_alias("7001", "阿桶")
+        self.assertFalse(ok)
+
+        # 3. 低鑑別度的名稱一律拒絕
+        for bad in ("今天", "可", "ab"):
+            ok, _ = await MemoryManager.add_alias("7001", bad)
+            self.assertFalse(ok, f"「{bad}」不應被接受")
+
+        # 4. 與自己的顯示名稱相同屬多餘
+        ok, reason = await MemoryManager.add_alias("7001", "岡部")
+        self.assertFalse(ok)
+        self.assertIn("顯示名稱相同", reason)
+
+    async def test_alias_respects_configured_cap(self):
+        """達數量上限時拒絕新增，且不得自動淘汰既有別名"""
+        await MemoryManager.update_user_profile("7001", "岡部", facts=[])
+
+        for name in ("鳳凰院", "凶真", "中二病"):
+            ok, _ = await MemoryManager.add_alias("7001", name, max_aliases=3)
+            self.assertTrue(ok)
+
+        ok, reason = await MemoryManager.add_alias("7001", "狂氣科學家", max_aliases=3)
+        self.assertFalse(ok)
+        self.assertIn("上限", reason)
+
+        # 既有別名必須完好保留
+        self.assertEqual(
+            sorted(a["alias"] for a in await MemoryManager.get_user_aliases("7001")),
+            sorted(["鳳凰院", "凶真", "中二病"])
+        )
+
+    async def test_alias_collision_disables_matching_for_both(self):
+        """別名與他人顯示名稱撞名時，該名稱一律停用比對（沿用既有碰撞規則）"""
+        await MemoryManager.update_user_profile("7001", "岡部", facts=[])
+        await MemoryManager.update_user_profile("7002", "桶子", facts=[])
+
+        # 繞過 add_alias 的校驗直接寫入，模擬「先設別名、之後有人改成同名」的競態
+        async with get_db_connection() as db:
+            await db.execute(
+                "UPDATE user_profiles SET aliases = ? WHERE user_id = ?",
+                (json.dumps([{"alias": "桶子", "source": "command", "by": [],
+                              "channel_id": "", "message_id": "", "at": 0}],
+                            ensure_ascii=False), "7001")
+            )
+            await db.commit()
+
+        # 「桶子」同時指向兩人 -> 整組排除，不猜
+        self.assertNotIn("桶子", await MemoryManager.get_known_users_map())
+        self.assertEqual(await MemoryManager.resolve_mentioned_user_ids("桶子在嗎"), [])
+
+    async def test_alias_learning_only_for_users_in_context(self):
+        """提煉學到的別名只能歸給本次對話上下文內的人（沿用 allowed_uids 白名單）"""
+        await MemoryManager.update_user_profile("7001", "岡部", facts=[])
+        await MemoryManager.update_user_profile("7002", "daru_1024", facts=[])
+        await MemoryManager.update_user_profile("7003", "路人", facts=[])
+
+        msgs = [
+            {"message_id": "a1", "channel_id": "777", "user_id": "7001",
+             "user_name": "岡部", "content": "桶子你昨天又通宵喔"},
+            {"message_id": "a2", "channel_id": "777", "user_id": "7002",
+             "user_name": "daru_1024", "content": "哪有"},
+        ]
+        for m in msgs:
+            await MemoryManager.save_message(m["message_id"], m["channel_id"],
+                                             m["user_id"], m["user_name"], m["content"])
+
+        # 模型同時替「在場的 7002」與「不在場的 7003」提議別名
+        ex = self._make_extractor([
+            {"user_id": "7002", "user_name": "daru_1024", "facts": [], "remove_facts": [],
+             "interaction_notes": "", "favorability_delta": 0, "aliases": ["桶子"]},
+            {"user_id": "7003", "user_name": "路人", "facts": [], "remove_facts": [],
+             "interaction_notes": "", "favorability_delta": 0, "aliases": ["小路"]},
+        ])
+        await ex.extract_dialogue(msgs, "777")
+
+        # 在場者學到別名，並記錄來源
+        learned = await MemoryManager.get_user_aliases("7002")
+        self.assertEqual([a["alias"] for a in learned], ["桶子"])
+        self.assertEqual(learned[0]["source"], "extraction")
+        self.assertEqual(learned[0]["channel_id"], "777")
+        self.assertIn("7001", learned[0]["by"])
+
+        # 不在場者的整筆更新（含別名）被白名單拒絕
+        self.assertEqual(await MemoryManager.get_user_aliases("7003"), [])
+
 
 if __name__ == "__main__":
     unittest.main()

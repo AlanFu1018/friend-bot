@@ -83,6 +83,7 @@ async def init_db():
             user_id TEXT PRIMARY KEY,
             user_name TEXT NOT NULL,
             facts TEXT DEFAULT '[]',
+            aliases TEXT DEFAULT '[]',
             interaction_notes TEXT DEFAULT '',
             favorability INTEGER DEFAULT {DEFAULT_FAVORABILITY},
             relationship_tier TEXT DEFAULT 'familiar',
@@ -108,6 +109,11 @@ async def init_db():
             if "last_gain_date" not in prof_cols:
                 await db.execute("ALTER TABLE user_profiles ADD COLUMN last_gain_date TEXT DEFAULT '';")
                 logger.info("已為 user_profiles 表新增 last_gain_date 欄位")
+            if "aliases" not in prof_cols:
+                # 別名與 user_name 分開儲存：user_name 由 Discord 權威覆寫，
+                # aliases 不受提煉碰觸，設了就保留。
+                await db.execute("ALTER TABLE user_profiles ADD COLUMN aliases TEXT DEFAULT '[]';")
+                logger.info("已為 user_profiles 表新增 aliases 欄位")
         except Exception as e:
             logger.debug(f"user_profiles 欄位檢查: {e}")
 

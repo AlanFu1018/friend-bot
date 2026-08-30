@@ -190,7 +190,15 @@ def parse_burst_reply_response(raw_text: str, default_target_id: str = "") -> Tu
 # 抽成共用常數避免未來調整輸出格式時漏改其中一處。至於「好感度評估」「深度結構化社交印象」等規則，
 # 單次即時與多輪批次兩種情境刻意使用不同措辭調校（前者針對單則發言的即時反應，後者針對整段對話的
 # 總結），因此保留在各自函式中分別維護，不強行合併。
-_EXTRACTION_OUTPUT_FORMAT_RULE = """5. 【輸出規範】：
+_EXTRACTION_ALIAS_RULE = """5. 【別名提議 (aliases)】：
+   - 若對話中有人以**顯示名稱以外的慣用綽號**稱呼某位在場群友（例如顯示名稱是
+     「daru_1024」，但大家都叫他「桶子」），請將該綽號填入那位群友的 "aliases"。
+   - 僅在你**明確判斷該綽號指的就是這個人**時才填，無法確定請給空列表 []。
+   - 只能提議「本次對話中確實出現的人」的綽號；不要替沒有出現的第三方取名，
+     也不要把話題內容、物品名稱或稱謂（例如「學長」「老師」）當成綽號。
+   - 這是為了讓機器人日後聽到綽號時能認出是誰，不是用來記錄事實。"""
+
+_EXTRACTION_OUTPUT_FORMAT_RULE = """6. 【輸出規範】：
    - 輸出嚴格的 JSON 物件，包含 "updates" 陣列。"""
 
 _EXTRACTION_OUTPUT_CLOSING_INSTRUCTION = "請直接輸出 JSON，不要附帶任何多餘文字。"
@@ -258,6 +266,7 @@ def build_multi_entity_extraction_prompt(
      * 【核心性格】：沉澱長期穩定的人格基調（中二、理性、溫柔、幽默自嘲等），若歷史已有記錄請參考保留並適度微調深化。
      * 【社交關係】：記錄對特定群友（如桶子、真由理等）的互動默契與態度，以及與紅莉栖的互動張力（傲嬌、調侃、尊重等）。
      * 【近期動態】：根據最新對話滾動更新當前的生活狀態、話題焦點、抱怨、作息或情緒動向。
+{_EXTRACTION_ALIAS_RULE}
 {_EXTRACTION_OUTPUT_FORMAT_RULE}
 
 【輸出 JSON 範例】：
@@ -269,6 +278,7 @@ def build_multi_entity_extraction_prompt(
       "user_name": "{speaker_name}",
       "facts": ["目前定居在台北市"],
       "remove_facts": ["住在台中"],
+      "aliases": [],
       "interaction_notes": "【核心性格】極度理性中帶著傲嬌，對未知科學充滿狂熱，是團隊的核心推手。\\n【社交關係】對桶子愛吐槽但非常信任，面對紅莉栖時嘴硬卻常被科學論點破防。\\n【近期動態】最近因為連夜做實驗而顯得疲憊，多次向群友抱怨程式 bug，互動時情緒較平時更直接。",
       "favorability_delta": 1
     }},
@@ -277,6 +287,7 @@ def build_multi_entity_extraction_prompt(
       "user_name": "桶子",
       "facts": ["最近常熬夜通宵"],
       "remove_facts": [],
+      "aliases": ["桶子"],
       "interaction_notes": "【核心性格】幽默隨和、專精技術的超級駭客，對二次元文化充滿熱忱。\\n【社交關係】常被岡部與真由理吐槽生活作息，但關鍵時刻極度可靠。\\n【近期動態】近期沉迷新出的 Galgame 與鍵盤硬體，連日熬夜打電動。",
       "favorability_delta": 0
     }}
@@ -342,6 +353,7 @@ def build_batch_dialogue_extraction_prompt(
      * 【核心性格】：沉澱長期穩定的人格特質基調，參考歷史記錄適度保留。
      * 【社交關係】：記錄對其他群友的互動態度，以及與紅莉栖的互動默契。
      * 【近期動態】：根據此批對話總結最近的生活焦點、情緒或話題動態。
+{_EXTRACTION_ALIAS_RULE}
 {_EXTRACTION_OUTPUT_FORMAT_RULE}
 
 【輸出 JSON 範例】：
@@ -353,6 +365,7 @@ def build_batch_dialogue_extraction_prompt(
       "user_name": "岡部",
       "facts": ["最近在研究時間機器新理論"],
       "remove_facts": [],
+      "aliases": [],
       "interaction_notes": "【核心性格】中二狂氣科學家風格，熱衷於發表作戰計畫。\\n【社交關係】常與桶子交流實驗室進展，對紅莉栖愛反駁卻深受信賴。\\n【近期動態】在群裡興奮地分享新的時間理論研究成果。",
       "favorability_delta": 1
     }},
@@ -361,6 +374,7 @@ def build_batch_dialogue_extraction_prompt(
       "user_name": "桶子",
       "facts": ["買了新靜音機械鍵盤"],
       "remove_facts": [],
+      "aliases": ["桶子"],
       "interaction_notes": "【核心性格】技術精湛且熱愛二次元文化的頂級駭客。\\n【社交關係】常與岡部互相吐槽，是實驗室的技術頂樑柱。\\n【近期動態】熱情地向大家推薦電腦週邊與靜音鍵盤。",
       "favorability_delta": 0
     }}

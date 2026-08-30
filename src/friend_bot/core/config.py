@@ -129,6 +129,11 @@ HISTORY_RECALL_MIN_SCORE: int = int(_mem_cfg.get("history_recall_min_score", 2))
 HISTORY_RECALL_MAX_QUERY_TOKENS: int = int(_mem_cfg.get("history_recall_max_query_tokens", 30))
 DB_PATH: str = str(BASE_DIR / _mem_cfg.get("db_path", "data/friend_bot.db"))
 
+# 7.05 別名 (Alias) 設定
+_alias_cfg = _mem_cfg.get("alias", {})
+ENABLE_ALIAS_LEARNING: bool = bool(_alias_cfg.get("enable_alias_learning", True))
+MAX_ALIASES_PER_USER: int = int(_alias_cfg.get("max_aliases_per_user", 5))
+
 # 7.1 三軌事實記憶檢索 (3-Track Fact RAG & Heat) 設定
 _facts_rag_cfg = _mem_cfg.get("facts_rag", {})
 FACTS_SPEAKER_MAX_TOTAL: int = int(_facts_rag_cfg.get("speaker_max_total", 8))

@@ -21,7 +21,8 @@ from src.friend_bot.core.config import (
     FACTS_OTHERS_RECENT_LIMIT,
     FACTS_RAG_HIT_COOLDOWN_SECONDS,
     FACTS_EXTRACTION_REAFFIRM_BONUS,
-    FACTS_RAG_HIT_BONUS
+    FACTS_RAG_HIT_BONUS,
+    MAX_ALIASES_PER_USER
 )
 from src.friend_bot.core.logger import get_logger
 
@@ -568,7 +569,7 @@ class MemoryManager:
         """取得單一用戶的畫像設定檔（包含結構化 facts）"""
         async with get_db_connection() as db:
             async with db.execute("""
-            SELECT user_id, user_name, facts, interaction_notes, favorability, relationship_tier, daily_favorability_gain, last_gain_date, updated_at
+            SELECT user_id, user_name, facts, aliases, interaction_notes, favorability, relationship_tier, daily_favorability_gain, last_gain_date, updated_at
             FROM user_profiles
             WHERE user_id = ?
             """, (str(user_id),)) as cursor:
@@ -581,6 +582,7 @@ class MemoryManager:
                     except Exception:
                         parsed = []
                     data["facts"] = MemoryManager.normalize_facts(parsed)
+                    data["aliases"] = MemoryManager.normalize_aliases(data.get("aliases"))
                     return data
                 return None
 
@@ -595,7 +597,7 @@ class MemoryManager:
         
         async with get_db_connection() as db:
             async with db.execute(f"""
-            SELECT user_id, user_name, facts, interaction_notes, favorability, relationship_tier, daily_favorability_gain, last_gain_date, updated_at
+            SELECT user_id, user_name, facts, aliases, interaction_notes, favorability, relationship_tier, daily_favorability_gain, last_gain_date, updated_at
             FROM user_profiles
             WHERE user_id IN ({placeholders})
             """, tuple(clean_uids)) as cursor:
@@ -609,11 +611,183 @@ class MemoryManager:
                     except Exception:
                         parsed = []
                     data["facts"] = MemoryManager.normalize_facts(parsed)
+                    data["aliases"] = MemoryManager.normalize_aliases(data.get("aliases"))
                     res[str(data["user_id"])] = data
                 return res
 
     # 已回報過的同名暱稱，避免每則訊息都重複警告（僅在碰撞名單變動時才輸出）
     _reported_ambiguous_names: Set[str] = set()
+
+    @staticmethod
+    def normalize_aliases(aliases_raw: Any) -> List[Dict[str, Any]]:
+        """將任意格式的別名資料統一為標準字典列表（含來源記錄）"""
+        if not aliases_raw:
+            return []
+
+        if isinstance(aliases_raw, str):
+            try:
+                aliases_raw = json.loads(aliases_raw)
+            except Exception:
+                return []
+
+        if not isinstance(aliases_raw, list):
+            return []
+
+        now = int(time.time())
+        normalized: List[Dict[str, Any]] = []
+        for item in aliases_raw:
+            if isinstance(item, dict) and str(item.get("alias", "")).strip():
+                normalized.append({
+                    "alias": str(item["alias"]).strip(),
+                    "source": str(item.get("source", "unknown")),
+                    "by": item.get("by") or [],
+                    "channel_id": str(item.get("channel_id", "")),
+                    "message_id": str(item.get("message_id", "")),
+                    "at": int(item.get("at", now))
+                })
+            elif isinstance(item, str) and item.strip():
+                normalized.append({
+                    "alias": item.strip(), "source": "unknown",
+                    "by": [], "channel_id": "", "message_id": "", "at": now
+                })
+        return normalized
+
+    @staticmethod
+    def alias_texts(aliases_raw: Any) -> List[str]:
+        """取出別名的純文字清單"""
+        return [a["alias"] for a in MemoryManager.normalize_aliases(aliases_raw)]
+
+    @staticmethod
+    async def _load_name_index() -> Tuple[Dict[str, Set[str]], Dict[str, List[Dict[str, Any]]]]:
+        """
+        載入「名稱 -> user_id 集合」索引，同時涵蓋 Discord 顯示名稱與別名。
+
+        回傳 (name_to_uids, aliases_by_uid)。兩者共用同一次查詢，避免重複讀庫。
+        """
+        async with get_db_connection() as db:
+            async with db.execute("SELECT user_id, user_name, aliases FROM user_profiles") as cursor:
+                rows = await cursor.fetchall()
+
+        name_to_uids: Dict[str, Set[str]] = {}
+        aliases_by_uid: Dict[str, List[Dict[str, Any]]] = {}
+
+        for r in rows:
+            uid = str(r["user_id"])
+            uname = str(r["user_name"]).strip().lower()
+            if uname:
+                name_to_uids.setdefault(uname, set()).add(uid)
+
+            alias_list = MemoryManager.normalize_aliases(r["aliases"])
+            aliases_by_uid[uid] = alias_list
+            for a in alias_list:
+                key = a["alias"].strip().lower()
+                if key:
+                    name_to_uids.setdefault(key, set()).add(uid)
+
+        return name_to_uids, aliases_by_uid
+
+    @staticmethod
+    async def get_user_aliases(user_id: str) -> List[Dict[str, Any]]:
+        """取得某位使用者的別名清單（含來源記錄）"""
+        async with get_db_connection() as db:
+            async with db.execute(
+                "SELECT aliases FROM user_profiles WHERE user_id = ?", (str(user_id),)
+            ) as cursor:
+                row = await cursor.fetchone()
+        return MemoryManager.normalize_aliases(row["aliases"]) if row else []
+
+    @staticmethod
+    async def add_alias(
+        user_id: str,
+        alias: str,
+        source: str = "command",
+        by: Optional[List[str]] = None,
+        channel_id: str = "",
+        message_id: str = "",
+        max_aliases: int = MAX_ALIASES_PER_USER
+    ) -> Tuple[bool, str]:
+        """
+        為使用者新增一個別名。回傳 (是否成功, 原因說明)。
+
+        會執行以下校驗，任一不通過即拒絕：
+        1. 通過 `is_matchable_name()`（非停用詞、長度足夠、非過短英數）
+        2. 不與任何既有的 user_name 或別名碰撞——這道擋掉冒名
+        3. 不與該使用者自己的顯示名稱重複（多餘）
+        4. 未超過每人數量上限（達上限時拒絕新增，不自動淘汰既有別名）
+
+        **不檢查「歸屬對象是否在本次對話上下文中」**——那是呼叫端的責任：
+        提煉路徑以 `allowed_uids` 白名單把關，指令路徑以 Discord 的呼叫者身分把關。
+        """
+        clean = str(alias or "").strip()
+        alias_key = clean.lower()
+        uid = str(user_id)
+
+        if not MemoryManager.is_matchable_name(alias_key):
+            return False, f"「{clean}」不適合作為別名（太短、是常見詞、或英數過短）"
+
+        lock = await MemoryManager._get_user_lock(uid)
+        async with lock:
+            profile = await MemoryManager.get_user_profile(uid)
+            if not profile:
+                return False, "該使用者尚無畫像記錄，無法設定別名"
+
+            if alias_key == str(profile.get("user_name", "")).strip().lower():
+                return False, f"「{clean}」與該使用者目前的顯示名稱相同，不需要另設別名"
+
+            name_to_uids, _ = await MemoryManager._load_name_index()
+            owners = name_to_uids.get(alias_key, set())
+            if owners - {uid}:
+                return False, f"「{clean}」已被其他使用者使用（顯示名稱或別名），無法重複設定"
+
+            current = MemoryManager.normalize_aliases(profile.get("aliases"))
+            if any(a["alias"].strip().lower() == alias_key for a in current):
+                return False, f"「{clean}」已經是這位使用者的別名了"
+
+            if len(current) >= max_aliases:
+                return False, f"已達別名數量上限（{max_aliases} 個），請先移除不用的別名"
+
+            current.append({
+                "alias": clean,
+                "source": source,
+                "by": [str(b) for b in (by or [])],
+                "channel_id": str(channel_id),
+                "message_id": str(message_id),
+                "at": int(time.time())
+            })
+            await MemoryManager._write_aliases(uid, current)
+
+        logger.info(
+            f"🏷️ [別名新增] 使用者 [{profile.get('user_name')} ({uid})] 新增別名「{clean}」"
+            f"（來源: {source}, 提出者: {by or '—'}, 訊息: {message_id or '—'}）"
+        )
+        return True, f"已將「{clean}」設定為別名"
+
+    @staticmethod
+    async def remove_alias(user_id: str, alias: str) -> Tuple[bool, str]:
+        """移除使用者的某個別名。回傳 (是否成功, 原因說明)。"""
+        alias_key = str(alias or "").strip().lower()
+        uid = str(user_id)
+
+        lock = await MemoryManager._get_user_lock(uid)
+        async with lock:
+            current = await MemoryManager.get_user_aliases(uid)
+            kept = [a for a in current if a["alias"].strip().lower() != alias_key]
+            if len(kept) == len(current):
+                return False, f"找不到別名「{alias}」"
+            await MemoryManager._write_aliases(uid, kept)
+
+        logger.info(f"🏷️ [別名移除] 使用者 ID:{uid} 移除別名「{alias}」")
+        return True, f"已移除別名「{alias}」"
+
+    @staticmethod
+    async def _write_aliases(user_id: str, aliases: List[Dict[str, Any]]) -> None:
+        """寫回別名清單（僅更新 aliases 欄位，不碰畫像的其他部分）"""
+        async with get_db_connection() as db:
+            await db.execute(
+                "UPDATE user_profiles SET aliases = ? WHERE user_id = ?",
+                (json.dumps(aliases, ensure_ascii=False), str(user_id))
+            )
+            await db.commit()
 
     @staticmethod
     async def get_known_users_map() -> Dict[str, str]:
@@ -626,16 +800,11 @@ class MemoryManager:
 
         排除後行為變成確定性的：要嘛找對人，要嘛找不到，不會找錯人。同名者仍可透過
         Discord 原生 @提及被精準識別（見 resolve_mentioned_user_ids 的維度 A）。
-        """
-        async with get_db_connection() as db:
-            async with db.execute("SELECT user_id, user_name FROM user_profiles") as cursor:
-                rows = await cursor.fetchall()
 
-        name_to_uids: Dict[str, Set[str]] = {}
-        for r in rows:
-            uname = str(r["user_name"]).strip().lower()
-            if uname:
-                name_to_uids.setdefault(uname, set()).add(str(r["user_id"]))
+        涵蓋範圍同時包含 Discord 顯示名稱與**別名**，兩者適用完全相同的碰撞規則——
+        別名撞到他人的顯示名稱（或別名）時一樣會被整組排除。
+        """
+        name_to_uids, _ = await MemoryManager._load_name_index()
 
         unique_map = {
             uname: next(iter(uids))

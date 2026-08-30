@@ -14,7 +14,8 @@ from src.friend_bot.core.config import (
     DAILY_GAIN_LIMIT,
     DAILY_LOSS_LIMIT,
     LISTEN_DEBOUNCE_SECONDS,
-    EXTRACTION_SWEEP_INTERVAL_SECONDS
+    EXTRACTION_SWEEP_INTERVAL_SECONDS,
+    ENABLE_ALIAS_LEARNING
 )
 
 logger = get_logger("extractor")
@@ -111,16 +112,25 @@ class MemoryExtractor:
         )
         allowed_uids: Set[str] = set(speaker_uids) | set(mentioned_uids)
 
+        # 別名學習的來源記錄：哪些人在這段對話中發言、位於哪個頻道、起始訊息為何。
+        # 別名寫錯會直接表現為「機器人把 X 當成 Y」，必須可稽核、可撤銷。
+        provenance = {
+            "by": speaker_uids,
+            "channel_id": str(channel_id),
+            "message_id": all_msg_ids[0] if all_msg_ids else ""
+        }
+
         try:
             if len(speaker_uids) >= 2:
-                await self._run_batch_engine(human_msgs, allowed_uids, names)
+                await self._run_batch_engine(human_msgs, allowed_uids, names, provenance)
             else:
                 await self._run_single_engine(
                     speaker_uid=speaker_uids[0],
                     messages=human_msgs,
                     mentioned_uids=mentioned_uids,
                     allowed_uids=allowed_uids,
-                    names=names
+                    names=names,
+                    provenance=provenance
                 )
         except Exception as e:
             # 保留 extracted=0，交由背景撿漏重試
@@ -137,7 +147,8 @@ class MemoryExtractor:
         self,
         messages: List[Dict[str, Any]],
         allowed_uids: Set[str],
-        names: Dict[str, str]
+        names: Dict[str, str],
+        provenance: Optional[Dict[str, Any]] = None
     ) -> None:
         """多人對話引擎：整段多輪對話全局分析，參與者平等歸屬"""
         profiles_dict = await MemoryManager.get_user_profiles_batch(list(allowed_uids))
@@ -159,7 +170,9 @@ class MemoryExtractor:
             enable_tools=False
         )
         updates = self._parse_updates(raw_result)
-        await self._safe_apply_updates(updates, allowed_uids=allowed_uids, authoritative_names=names)
+        await self._safe_apply_updates(
+            updates, allowed_uids=allowed_uids, authoritative_names=names, provenance=provenance
+        )
 
     async def _run_single_engine(
         self,
@@ -167,7 +180,8 @@ class MemoryExtractor:
         messages: List[Dict[str, Any]],
         mentioned_uids: List[str],
         allowed_uids: Set[str],
-        names: Dict[str, str]
+        names: Dict[str, str],
+        provenance: Optional[Dict[str, Any]] = None
     ) -> None:
         """單人主角引擎：一位明確發言者，附上被提及者的畫像供跨使用者歸屬"""
         speaker_info = await self._build_speaker_info(
@@ -193,7 +207,8 @@ class MemoryExtractor:
             other_users_info=other_users_info,
             recent_messages=recent_messages,
             allowed_uids=allowed_uids,
-            names=names
+            names=names,
+            provenance=provenance
         )
 
     async def _call_single_engine(
@@ -202,7 +217,8 @@ class MemoryExtractor:
         other_users_info: List[Dict[str, Any]],
         recent_messages: List[str],
         allowed_uids: Set[str],
-        names: Dict[str, str]
+        names: Dict[str, str],
+        provenance: Optional[Dict[str, Any]] = None
     ) -> None:
         """單人主角引擎的實際呼叫：組 prompt → 請求模型 → 解析 → 安全套用"""
         prompt = build_multi_entity_extraction_prompt(
@@ -218,7 +234,9 @@ class MemoryExtractor:
             enable_tools=False
         )
         updates = self._parse_updates(raw_result)
-        await self._safe_apply_updates(updates, allowed_uids=allowed_uids, authoritative_names=names)
+        await self._safe_apply_updates(
+            updates, allowed_uids=allowed_uids, authoritative_names=names, provenance=provenance
+        )
 
     @staticmethod
     async def _build_speaker_info(user_id: str, user_name: str) -> Dict[str, Any]:
@@ -250,7 +268,8 @@ class MemoryExtractor:
         self,
         updates: List[Dict[str, Any]],
         allowed_uids: Optional[Set[str]] = None,
-        authoritative_names: Optional[Dict[str, str]] = None
+        authoritative_names: Optional[Dict[str, str]] = None,
+        provenance: Optional[Dict[str, Any]] = None
     ) -> None:
         """
         核心安全合併管線：歷史事實永久保護 + remove_facts 精準更正 + 提煉重複加權 + 好感度計算。
@@ -356,6 +375,46 @@ class MemoryExtractor:
                 }
 
             await MemoryManager.apply_profile_update(target_uid, _mutator)
+
+            # 【別名學習】模型可提議綽號，但必須通過全部校驗才會生效。
+            # 條件 3（歸屬對象須在本次對話上下文內）由上方的 allowed_uids 白名單保證：
+            # 能走到這裡代表 target_uid 確實在這段對話中出現過（發言或被提及），
+            # 因此系統不會替一個從未現身的人建立稱呼。
+            if ENABLE_ALIAS_LEARNING:
+                await self._apply_alias_proposals(
+                    target_uid, update_item.get("aliases", []), provenance or {}
+                )
+
+    async def _apply_alias_proposals(
+        self,
+        target_uid: str,
+        proposals: Any,
+        provenance: Dict[str, Any]
+    ) -> None:
+        """
+        套用模型提議的別名。校驗與寫入交由 MemoryManager.add_alias 統一處理
+        （格式檢查、全站碰撞排除、數量上限），這裡只負責過濾格式與記錄來源。
+
+        每一筆成功寫入都會留下來源（誰的哪則訊息、何時），因為別名寫錯會直接表現為
+        「機器人把 X 當成 Y」，必須可稽核、可撤銷。
+        """
+        if not isinstance(proposals, list) or not proposals:
+            return
+
+        for raw in proposals[:5]:   # 單次提煉最多採納 5 筆提議，避免模型灌爆
+            alias = str(raw).strip()
+            if not alias:
+                continue
+            ok, reason = await MemoryManager.add_alias(
+                user_id=target_uid,
+                alias=alias,
+                source="extraction",
+                by=provenance.get("by", []),
+                channel_id=str(provenance.get("channel_id", "")),
+                message_id=str(provenance.get("message_id", ""))
+            )
+            if not ok:
+                logger.debug(f"🏷️ [別名提議未採納] ID:{target_uid} 「{alias}」：{reason}")
 
     # ==================== 對外相容介面 ====================
 
