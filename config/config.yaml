@@ -172,6 +172,15 @@ memory:
     # 背景語意去重批次的執行間隔秒數。
     dedup_sweep_interval_seconds: 1800
 
+  # 【互動印象保護 (Interaction Notes Protection) 設定】
+  # 模型每次提煉會整段輸出 interaction_notes（含【核心性格】【社交關係】【近期動態】三個
+  # 標籤），先前沒有任何保護機制——一次輸出格式跑掉或忘記帶入舊人設，累積最久、最難
+  # 重建的【核心性格】就會永久消失（見 memory_sys_design.md §10）。
+  interaction_notes_protection:
+    # 【核心性格】【社交關係】段落的疑似遺失判定門檻：新段落字數低於舊版此比例時，
+    # 視為異常萎縮，該段落保留舊版（【近期動態】不受此限制，本來就該每次更新）。
+    shrink_ratio: 0.4
+
 # 語音頻道感知與音樂推薦 (Music Suggestion) 設定
 music:
   # 是否啟用語音頻道感知與音樂推薦。

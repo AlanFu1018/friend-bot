@@ -1818,6 +1818,146 @@ class TestFriendBotFeatures(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(f["embedding"])
             self.assertEqual(f["embedding_model"], "test-model")
 
+    # ==================== 29. 互動印象保護 (Interaction Notes Protection) ====================
+
+    def test_parse_interaction_notes_extracts_three_sections(self):
+        notes = "【核心性格】中二狂氣科學家。\n【社交關係】與桶子互相吐槽。\n【近期動態】最近在研究新理論。"
+        sections = MemoryManager.parse_interaction_notes(notes)
+        self.assertEqual(sections["core"], "中二狂氣科學家。")
+        self.assertEqual(sections["social"], "與桶子互相吐槽。")
+        self.assertEqual(sections["recent"], "最近在研究新理論。")
+
+    def test_merge_interaction_notes_rejects_incomplete_format(self):
+        """新輸出缺任一標籤 -> 視為異常輸出，整份拒絕，保留舊 notes"""
+        current = "【核心性格】中二狂氣科學家，熱衷於發表作戰計畫。\n【社交關係】與桶子互相吐槽。\n【近期動態】舊近況。"
+        incoming = "【核心性格】中二。"  # 缺【社交關係】【近期動態】
+        merged = MemoryManager.merge_interaction_notes(current, incoming)
+        self.assertEqual(merged, current)
+
+    def test_merge_interaction_notes_protects_shrinking_core_section(self):
+        """【核心性格】新段落字數低於舊版 40% 門檻 -> 保留舊版，其他段落仍正常更新"""
+        current = (
+            "【核心性格】中二狂氣科學家風格，熱衷於發表誇張的作戰宣言，對未知科學充滿狂熱。\n"
+            "【社交關係】常與桶子互相吐槽。\n"
+            "【近期動態】舊近況。"
+        )
+        incoming = (
+            "【核心性格】中二。\n"
+            "【社交關係】常與桶子和真由理互相吐槽，感情很好。\n"
+            "【近期動態】最近在研究新的時間機器理論。"
+        )
+        merged = MemoryManager.merge_interaction_notes(current, incoming)
+        merged_sections = MemoryManager.parse_interaction_notes(merged)
+        # 核心性格大幅萎縮 -> 保留舊版
+        self.assertIn("中二狂氣科學家風格", merged_sections["core"])
+        # 社交關係、近期動態未萎縮 -> 正常採用新版
+        self.assertEqual(merged_sections["social"], "常與桶子和真由理互相吐槽，感情很好。")
+        self.assertEqual(merged_sections["recent"], "最近在研究新的時間機器理論。")
+
+    def test_merge_interaction_notes_accepts_normal_evolution(self):
+        """正常演進（無萎縮）時，三段落皆採用新版"""
+        current = "【核心性格】理性中帶傲嬌。\n【社交關係】與桶子熟識。\n【近期動態】舊近況。"
+        incoming = "【核心性格】理性中帶傲嬌，近期更加信任夥伴。\n【社交關係】與桶子、真由理都熟識。\n【近期動態】新近況。"
+        merged = MemoryManager.merge_interaction_notes(current, incoming)
+        self.assertEqual(merged, incoming)
+
+    def test_merge_interaction_notes_empty_current_accepts_incoming(self):
+        """舊資料為空時（新畫像）直接採用格式完整的新輸出，不受萎縮檢查阻擋（沒有比對基準）"""
+        incoming = "【核心性格】中二。\n【社交關係】尚無。\n【近期動態】剛加入群組。"
+        merged = MemoryManager.merge_interaction_notes("", incoming)
+        self.assertEqual(merged, incoming)
+
+    def test_merge_interaction_notes_still_rejects_malformed_on_empty_current(self):
+        """即使是全新畫像（無比對基準），格式不完整的輸出仍應被拒絕，不寫入半成品"""
+        incoming = "【核心性格】中二。"  # 缺【社交關係】【近期動態】
+        merged = MemoryManager.merge_interaction_notes("", incoming)
+        self.assertEqual(merged, "")
+
+    async def test_extraction_snapshots_previous_notes_before_shrink_protected_replace(self):
+        """提煉路徑：notes 被實際換掉時才寫入一版快照，供之後人工查看/還原"""
+        user_id = "notes_protect_1"
+        await MemoryManager.update_user_profile(
+            user_id=user_id, user_name="人設測試員",
+            interaction_notes=(
+                "【核心性格】理性中帶傲嬌，對未知科學充滿狂熱，是團隊的核心推手。\n"
+                "【社交關係】對桶子愛吐槽但非常信任。\n"
+                "【近期動態】舊近況。"
+            )
+        )
+        await MemoryManager.save_message("np1", "777", user_id, "人設測試員", "我換了新鍵盤")
+
+        ex = self._make_extractor([
+            {"user_id": user_id, "user_name": "人設測試員", "facts": [], "remove_facts": [],
+             "interaction_notes": (
+                 "【核心性格】傲嬌。\n"  # 大幅萎縮，應被保護
+                 "【社交關係】對桶子依然信任，互動更頻繁。\n"
+                 "【近期動態】剛換了新鍵盤，很開心。"
+             ),
+             "favorability_delta": 0},
+        ])
+        await ex.extract_dialogue(
+            [{"message_id": "np1", "channel_id": "777", "user_id": user_id,
+              "user_name": "人設測試員", "content": "我換了新鍵盤"}], "777"
+        )
+
+        p = await MemoryManager.get_user_profile(user_id)
+        sections = MemoryManager.parse_interaction_notes(p["interaction_notes"])
+        self.assertIn("理性中帶傲嬌", sections["core"])          # 核心性格受保護，未被覆蓋
+        self.assertIn("剛換了新鍵盤", sections["recent"])         # 近期動態正常更新
+        self.assertNotEqual(p["interaction_notes_prev"], "")      # 快照已寫入
+        self.assertIn("理性中帶傲嬌", p["interaction_notes_prev"])
+        self.assertGreater(p["interaction_notes_prev_at"], 0)
+
+    async def test_restore_interaction_notes_swaps_with_snapshot(self):
+        """還原是與目前版本互換，不是單向覆蓋——因此可重複執行來回切換"""
+        user_id = "notes_restore_1"
+        current_notes = "【核心性格】傲嬌。\n【社交關係】普通。\n【近期動態】新近況。"
+        prev_notes = "【核心性格】理性中帶傲嬌，對科學充滿狂熱。\n【社交關係】對桶子非常信任。\n【近期動態】舊近況。"
+
+        await MemoryManager.update_user_profile(
+            user_id=user_id, user_name="還原測試員",
+            interaction_notes=current_notes,
+            interaction_notes_prev=prev_notes,
+            interaction_notes_prev_at=100
+        )
+
+        ok, reason = await MemoryManager.restore_interaction_notes(user_id)
+        self.assertTrue(ok)
+        self.assertIn("已還原", reason)
+
+        p = await MemoryManager.get_user_profile(user_id)
+        self.assertEqual(p["interaction_notes"], prev_notes)
+        self.assertEqual(p["interaction_notes_prev"], current_notes)
+        self.assertGreater(p["interaction_notes_prev_at"], 100)
+
+        # 再執行一次應該切換回原本的版本（天然可逆）
+        ok2, _ = await MemoryManager.restore_interaction_notes(user_id)
+        self.assertTrue(ok2)
+        p2 = await MemoryManager.get_user_profile(user_id)
+        self.assertEqual(p2["interaction_notes"], current_notes)
+        self.assertEqual(p2["interaction_notes_prev"], prev_notes)
+
+    async def test_restore_interaction_notes_fails_without_snapshot(self):
+        """沒有快照時應失敗且不改動任何資料"""
+        user_id = "notes_restore_2"
+        await MemoryManager.update_user_profile(
+            user_id=user_id, user_name="無快照測試員",
+            interaction_notes="【核心性格】普通。\n【社交關係】普通。\n【近期動態】普通。"
+        )
+
+        ok, reason = await MemoryManager.restore_interaction_notes(user_id)
+        self.assertFalse(ok)
+        self.assertIn("沒有可還原", reason)
+
+        p = await MemoryManager.get_user_profile(user_id)
+        self.assertEqual(p["interaction_notes"], "【核心性格】普通。\n【社交關係】普通。\n【近期動態】普通。")
+
+    async def test_restore_interaction_notes_missing_profile(self):
+        """使用者不存在時應回報失敗原因，不拋出例外"""
+        ok, reason = await MemoryManager.restore_interaction_notes("no_such_user_999")
+        self.assertFalse(ok)
+        self.assertIn("找不到", reason)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -114,6 +114,14 @@ async def init_db():
                 # aliases 不受提煉碰觸，設了就保留。
                 await db.execute("ALTER TABLE user_profiles ADD COLUMN aliases TEXT DEFAULT '[]';")
                 logger.info("已為 user_profiles 表新增 aliases 欄位")
+            if "interaction_notes_prev" not in prof_cols:
+                # 互動印象保護的一版快照：被取代前的完整 interaction_notes，
+                # 供之後人工查看/還原（見 MemoryManager.merge_interaction_notes）。
+                await db.execute("ALTER TABLE user_profiles ADD COLUMN interaction_notes_prev TEXT DEFAULT '';")
+                logger.info("已為 user_profiles 表新增 interaction_notes_prev 欄位")
+            if "interaction_notes_prev_at" not in prof_cols:
+                await db.execute("ALTER TABLE user_profiles ADD COLUMN interaction_notes_prev_at INTEGER DEFAULT 0;")
+                logger.info("已為 user_profiles 表新增 interaction_notes_prev_at 欄位")
         except Exception as e:
             logger.debug(f"user_profiles 欄位檢查: {e}")
 

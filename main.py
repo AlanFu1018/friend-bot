@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import sys
+from datetime import datetime
 from pathlib import Path
 
 # 自動將專案根目錄加入 sys.path
@@ -18,7 +19,8 @@ from src.friend_bot.memory import (
     init_db,
     clear_all_memory,
     clear_history_only,
-    clear_profiles_only
+    clear_profiles_only,
+    MemoryManager
 )
 from src.friend_bot.bot.client import FriendBotClient
 
@@ -50,7 +52,39 @@ def parse_args():
         action="store_true",
         help="執行完記憶清理後直接結束程式，不啟動 Discord 機器人"
     )
+    parser.add_argument(
+        "--view-notes",
+        metavar="USER_ID",
+        help="查看指定使用者目前的互動印象與上一版快照（唯讀，不修改資料），執行後直接結束"
+    )
+    parser.add_argument(
+        "--restore-notes",
+        metavar="USER_ID",
+        help=(
+            "將指定使用者的互動印象還原為上一版快照（與目前版本互換，可重複執行來回切換），"
+            "執行後直接結束。僅此 CLI 提供，不開放 Discord 指令——這個操作直接覆寫他人的"
+            "長期人設資料，安全邊界應落在能操作主機的人身上"
+        )
+    )
     return parser.parse_args()
+
+async def _print_notes_status(user_id: str) -> None:
+    """印出指定使用者目前的互動印象與上一版快照，供決定是否需要 --restore-notes"""
+    profile = await MemoryManager.get_user_profile(user_id)
+    if not profile:
+        logger.info(f"⚠️ 找不到使用者 {user_id} 的畫像記錄")
+        return
+
+    current = profile.get("interaction_notes", "").strip() or "（無）"
+    prev = profile.get("interaction_notes_prev", "").strip() or "（無快照）"
+    prev_at = profile.get("interaction_notes_prev_at", 0)
+    prev_at_str = (
+        datetime.fromtimestamp(prev_at).strftime("%Y-%m-%d %H:%M:%S") if prev_at else "—"
+    )
+
+    logger.info(f"📋 使用者 [{profile.get('user_name', user_id)} ({user_id})] 的互動印象")
+    logger.info(f"── 目前版本 ──\n{current}")
+    logger.info(f"── 上一版快照（{prev_at_str}）──\n{prev}")
 
 async def main():
     args = parse_args()
@@ -70,6 +104,16 @@ async def main():
     # 若指定了 --only-clear，清理後直接結束
     if args.only_clear:
         logger.info("記憶清理任務完成，程式順利結束。")
+        return
+
+    # 2.1 互動印象查看／還原（唯讀或還原後直接結束，不啟動 Discord 機器人）
+    if args.view_notes:
+        await _print_notes_status(args.view_notes)
+        return
+
+    if args.restore_notes:
+        ok, reason = await MemoryManager.restore_interaction_notes(args.restore_notes)
+        logger.info(f"{'✅' if ok else '⚠️'} [互動印象還原] 使用者 {args.restore_notes}：{reason}")
         return
 
     # 3. 檢查 Discord Token

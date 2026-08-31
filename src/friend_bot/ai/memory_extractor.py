@@ -1,6 +1,7 @@
 import asyncio
 import json
 import re
+import time
 from collections import defaultdict
 from typing import List, Dict, Any, Optional, Set
 from src.friend_bot.memory.memory_manager import MemoryManager
@@ -319,6 +320,8 @@ class MemoryExtractor:
             def _mutator(current_p: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
                 cur_facts = current_p.get("facts", []) if current_p else []
                 cur_notes = current_p.get("interaction_notes", "") if current_p else ""
+                cur_notes_prev = current_p.get("interaction_notes_prev", "") if current_p else ""
+                cur_notes_prev_at = current_p.get("interaction_notes_prev_at", 0) if current_p else 0
                 cur_fav = current_p.get("favorability", DEFAULT_FAVORABILITY) if current_p else DEFAULT_FAVORABILITY
                 cur_tier = current_p.get("relationship_tier", "familiar") if current_p else "familiar"
                 cur_daily_gain = current_p.get("daily_favorability_gain", 0) if current_p else 0
@@ -330,7 +333,14 @@ class MemoryExtractor:
                     incoming_facts_raw=incoming_facts_raw,
                     remove_facts_raw=remove_facts_raw
                 )
-                merged_notes = str(notes).strip() if (notes and str(notes).strip()) else cur_notes
+                merged_notes = MemoryManager.merge_interaction_notes(cur_notes, notes)
+
+                # 互動印象保護：一版快照。只有在 notes 真的被換掉、且舊版非空時才更新快照，
+                # 否則沿用既有快照——避免每次未變更 notes 的提煉都把快照往前推一格。
+                if merged_notes != cur_notes and cur_notes.strip():
+                    new_notes_prev, new_notes_prev_at = cur_notes, int(time.time())
+                else:
+                    new_notes_prev, new_notes_prev_at = cur_notes_prev, cur_notes_prev_at
 
                 if ENABLE_FAVORABILITY and delta_int != 0:
                     new_fav, new_tier, new_daily_gain, today_str = MemoryManager.calculate_favorability_update(
@@ -369,6 +379,8 @@ class MemoryExtractor:
                     "user_name": final_user_name,
                     "facts": merged_facts,
                     "interaction_notes": merged_notes,
+                    "interaction_notes_prev": new_notes_prev,
+                    "interaction_notes_prev_at": new_notes_prev_at,
                     "favorability": new_fav,
                     "relationship_tier": new_tier,
                     "daily_favorability_gain": new_daily_gain,

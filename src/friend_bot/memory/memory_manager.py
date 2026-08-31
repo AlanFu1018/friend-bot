@@ -25,7 +25,8 @@ from src.friend_bot.core.config import (
     FACTS_RAG_HIT_BONUS,
     MAX_ALIASES_PER_USER,
     FACTS_MAX_STORED_PER_USER,
-    FACTS_DEDUP_SIMILARITY_THRESHOLD
+    FACTS_DEDUP_SIMILARITY_THRESHOLD,
+    INTERACTION_NOTES_SHRINK_RATIO
 )
 from src.friend_bot.core.logger import get_logger
 
@@ -538,6 +539,136 @@ class MemoryManager:
 
         return MemoryManager.evict_stale_facts(merged_facts, max_total=max_total)
 
+    # 互動印象的三個結構化標籤（見 ai/prompts.py 的提煉 prompt 範例）
+    _NOTES_SECTION_LABELS: Tuple[Tuple[str, str], ...] = (
+        ("core", "核心性格"),
+        ("social", "社交關係"),
+        ("recent", "近期動態")
+    )
+
+    @staticmethod
+    def parse_interaction_notes(text: str) -> Dict[str, str]:
+        """
+        解析互動印象的三個結構化標籤（【核心性格】【社交關係】【近期動態】），
+        缺少的標籤回傳空字串。供 `merge_interaction_notes()` 逐段比對用。
+        """
+        text = text or ""
+        sections: Dict[str, str] = {key: "" for key, _ in MemoryManager._NOTES_SECTION_LABELS}
+        all_labels = "|".join(re.escape(label) for _, label in MemoryManager._NOTES_SECTION_LABELS)
+
+        for key, label in MemoryManager._NOTES_SECTION_LABELS:
+            pattern = rf'【{re.escape(label)}】(.*?)(?=【(?:{all_labels})】|$)'
+            match = re.search(pattern, text, re.DOTALL)
+            if match:
+                sections[key] = match.group(1).strip()
+
+        return sections
+
+    @staticmethod
+    def merge_interaction_notes(
+        current_notes: str,
+        incoming_notes: str,
+        shrink_ratio: float = INTERACTION_NOTES_SHRINK_RATIO
+    ) -> str:
+        """
+        互動印象的保護合併：三個標籤各自獨立判斷是否接受覆蓋，而非整包全有全無。
+
+        模型每次提煉整段輸出 interaction_notes，先前沒有任何保護——一次輸出格式跑掉
+        或忘記帶入舊人設，累積最久、最難重建的【核心性格】就會永久消失（facts 有聯集/
+        熱度/否定推翻三層保護，interaction_notes 原本完全沒有）。這裡加兩道防線：
+
+        1. 【格式完整性】：新輸出若缺任一標籤，視為異常輸出（截斷/格式跑掉），
+           整份拒絕，保留舊 notes。
+        2. 【疑似遺失偵測】：【核心性格】【社交關係】屬於「累積演進」性質，不該大幅
+           萎縮；若新段落字數低於舊版的 shrink_ratio，視為疑似遺失，該段落保留舊版，
+           但其他段落（尤其【近期動態】——本來就該每次滾動更新）仍正常採用新內容。
+
+        是否要保留一版快照（供人工查看/還原）由呼叫端自行比對回傳值與 current_notes
+        是否不同來決定，這裡只負責合併判斷本身。
+        """
+        incoming = (incoming_notes or "").strip()
+        current = (current_notes or "").strip()
+
+        if not incoming:
+            return current
+
+        new_sections = MemoryManager.parse_interaction_notes(incoming)
+        if not all(new_sections.values()):
+            logger.warning(
+                f"⚠️ [互動印象格式異常] 新輸出缺少必要標籤，本次覆蓋已拒絕：{incoming[:80]}…"
+            )
+            return current
+
+        if not current:
+            return incoming
+
+        cur_sections = MemoryManager.parse_interaction_notes(current)
+        if not all(cur_sections.values()):
+            # 舊資料本身格式不完整（例如尚未結構化的舊版資料），沒有比對基準，直接採用新輸出
+            return incoming
+
+        final_sections = dict(new_sections)
+        for key, label in MemoryManager._NOTES_SECTION_LABELS:
+            if key == "recent":
+                continue  # 近期動態本來就該每次滾動更新，不設萎縮保護
+
+            old_len = len(cur_sections[key])
+            new_len = len(new_sections[key])
+            if old_len > 0 and new_len < old_len * shrink_ratio:
+                final_sections[key] = cur_sections[key]
+                logger.warning(
+                    f"⚠️ [互動印象疑似遺失] 【{label}】新段落字數（{new_len}）低於舊版"
+                    f"（{old_len}）的 {int(shrink_ratio * 100)}%，已保留舊版內容"
+                )
+
+        return "\n".join(
+            f"【{label}】{final_sections[key]}" for key, label in MemoryManager._NOTES_SECTION_LABELS
+        )
+
+    @staticmethod
+    async def restore_interaction_notes(user_id: str) -> Tuple[bool, str]:
+        """
+        將指定使用者的互動印象還原為上一版快照，與目前版本**互換**（而非單向覆蓋覆寫）。
+
+        設計成互換而非單向還原，是刻意讓這個操作天然可逆——重複執行會在兩版之間
+        來回切換，誤操作也能立刻復原，不需要額外的「復原復原」機制。只保留一版快照
+        （非完整歷史），因此只能挽救最近一次覆蓋，這是刻意的取捨（見 §「互動印象保護」
+        設計說明）。
+
+        僅供 CLI（`main.py`）呼叫，刻意不開放成 Discord 指令：這個操作直接覆寫另一位
+        使用者的長期人設資料，安全邊界應該落在能操作主機／啟動程式的人，而非任何
+        Discord 伺服器管理員。
+        """
+        uid = str(user_id)
+        result: Dict[str, Any] = {"ok": False, "reason": ""}
+
+        def _mutator(profile: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+            if not profile:
+                result["reason"] = "找不到該使用者的畫像記錄"
+                return None
+
+            prev = str(profile.get("interaction_notes_prev", "") or "")
+            if not prev.strip():
+                result["reason"] = "沒有可還原的上一版快照"
+                return None
+
+            result["ok"] = True
+            result["reason"] = "已還原至上一版互動印象"
+            return {
+                "user_name": profile.get("user_name", "用戶"),
+                "facts": profile.get("facts", []),
+                "interaction_notes": prev,
+                "interaction_notes_prev": profile.get("interaction_notes", ""),
+                "interaction_notes_prev_at": int(time.time()),
+                "favorability": profile.get("favorability"),
+                "relationship_tier": profile.get("relationship_tier"),
+                "daily_favorability_gain": profile.get("daily_favorability_gain"),
+                "last_gain_date": profile.get("last_gain_date")
+            }
+
+        await MemoryManager.apply_profile_update(uid, _mutator)
+        return result["ok"], result["reason"]
+
     @staticmethod
     def extract_keywords(text: str) -> Set[str]:
         """從文本中提取有語意的關鍵字集合（英文實詞 + 中文 2/3-gram 滑動切片）"""
@@ -773,7 +904,9 @@ class MemoryManager:
         """取得單一用戶的畫像設定檔（包含結構化 facts）"""
         async with get_db_connection() as db:
             async with db.execute("""
-            SELECT user_id, user_name, facts, aliases, interaction_notes, favorability, relationship_tier, daily_favorability_gain, last_gain_date, updated_at
+            SELECT user_id, user_name, facts, aliases, interaction_notes, interaction_notes_prev,
+                   interaction_notes_prev_at, favorability, relationship_tier, daily_favorability_gain,
+                   last_gain_date, updated_at
             FROM user_profiles
             WHERE user_id = ?
             """, (str(user_id),)) as cursor:
@@ -798,10 +931,12 @@ class MemoryManager:
 
         clean_uids = [str(uid) for uid in set(user_ids) if uid]
         placeholders = ",".join(["?"] * len(clean_uids))
-        
+
         async with get_db_connection() as db:
             async with db.execute(f"""
-            SELECT user_id, user_name, facts, aliases, interaction_notes, favorability, relationship_tier, daily_favorability_gain, last_gain_date, updated_at
+            SELECT user_id, user_name, facts, aliases, interaction_notes, interaction_notes_prev,
+                   interaction_notes_prev_at, favorability, relationship_tier, daily_favorability_gain,
+                   last_gain_date, updated_at
             FROM user_profiles
             WHERE user_id IN ({placeholders})
             """, tuple(clean_uids)) as cursor:
@@ -1212,17 +1347,27 @@ class MemoryManager:
         user_name: str,
         facts: Optional[List[Any]] = None,
         interaction_notes: Optional[str] = None,
+        interaction_notes_prev: Optional[str] = None,
+        interaction_notes_prev_at: Optional[int] = None,
         favorability: Optional[int] = None,
         relationship_tier: Optional[str] = None,
         daily_favorability_gain: Optional[int] = None,
         last_gain_date: Optional[str] = None
     ) -> None:
-        """更新或建立特定用戶畫像設定檔"""
+        """
+        更新或建立特定用戶畫像設定檔。
+
+        interaction_notes_prev / interaction_notes_prev_at：互動印象保護機制的一版快照
+        （被 interaction_notes 取代前的完整內容 + 時間戳），由呼叫端（見
+        MemoryManager.merge_interaction_notes）決定何時更新，這裡只負責原樣寫入。
+        """
         current = await MemoryManager.get_user_profile(user_id)
 
         if current:
             new_facts = MemoryManager.normalize_facts(facts) if facts is not None else current["facts"]
             new_notes = interaction_notes if interaction_notes is not None else current["interaction_notes"]
+            new_notes_prev = interaction_notes_prev if interaction_notes_prev is not None else current.get("interaction_notes_prev", "")
+            new_notes_prev_at = interaction_notes_prev_at if interaction_notes_prev_at is not None else current.get("interaction_notes_prev_at", 0)
             new_fav = favorability if favorability is not None else current["favorability"]
             new_tier = relationship_tier if relationship_tier is not None else current["relationship_tier"]
             new_daily_gain = daily_favorability_gain if daily_favorability_gain is not None else current["daily_favorability_gain"]
@@ -1230,6 +1375,8 @@ class MemoryManager:
         else:
             new_facts = MemoryManager.normalize_facts(facts) if facts is not None else []
             new_notes = interaction_notes or ""
+            new_notes_prev = interaction_notes_prev or ""
+            new_notes_prev_at = interaction_notes_prev_at or 0
             new_fav = favorability if favorability is not None else DEFAULT_FAVORABILITY
             new_tier = relationship_tier or MemoryManager.compute_relationship_tier(new_fav)
             new_daily_gain = daily_favorability_gain if daily_favorability_gain is not None else 0
@@ -1240,14 +1387,17 @@ class MemoryManager:
         async with get_db_connection() as db:
             await db.execute("""
             INSERT INTO user_profiles (
-                user_id, user_name, facts, interaction_notes, favorability, relationship_tier,
+                user_id, user_name, facts, interaction_notes, interaction_notes_prev,
+                interaction_notes_prev_at, favorability, relationship_tier,
                 daily_favorability_gain, last_gain_date, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(user_id) DO UPDATE SET
                 user_name = excluded.user_name,
                 facts = excluded.facts,
                 interaction_notes = excluded.interaction_notes,
+                interaction_notes_prev = excluded.interaction_notes_prev,
+                interaction_notes_prev_at = excluded.interaction_notes_prev_at,
                 favorability = excluded.favorability,
                 relationship_tier = excluded.relationship_tier,
                 daily_favorability_gain = excluded.daily_favorability_gain,
@@ -1258,6 +1408,8 @@ class MemoryManager:
                 str(user_name),
                 facts_json,
                 str(new_notes).strip(),
+                str(new_notes_prev).strip(),
+                int(new_notes_prev_at),
                 int(new_fav),
                 str(new_tier),
                 int(new_daily_gain),

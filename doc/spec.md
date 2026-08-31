@@ -1,4 +1,4 @@
-# 事實容量控制與去重機制 — 功能規格
+# 記憶保護機制擴充 — 功能規格（事實容量控制／語意去重／互動印象保護）
 
 > 本文件狀態：**已實作**（2026-09-01）。目標：解決 `user_profiles.facts` 原本無上限成長的問題
 > （`merge_facts()` 原本只會新增/取代/加權，沒有任何路徑會縮小清單）。
@@ -98,3 +98,40 @@
 9. **缺少對應測試規劃**：`group_facts()`、`evict_stale_facts()`、`resolve_fact_conflict()` 都是可脫離 API 的決定性邏輯，應比照 `test/tests_verify.py` 現有 62 項測試的模式補上案例，尤其是「熱門重複」「矛盾 vs 重複」這兩個邊界情況。
 
 10. **首次遷移的一次性尖峰未考慮**：現有 profiles 的 facts 都沒有 `embedding` 欄位，第一次跑 `dedupe_facts()` 時所有使用者會同時觸發補算，可能造成一次性 API 呼叫尖峰，需要節流或分批處理。
+
+---
+
+## 11. 互動印象保護（Interaction Notes Protection）— 已實作
+
+> 背景：`user_profiles.interaction_notes` 承載模型每次提煉整段輸出的三段式互動印象
+> （【核心性格】【社交關係】【近期動態】）。facts 有聯集／熱度／否定推翻三層保護，
+> 但 interaction_notes 原本完全沒有——模型只要這次輸出非空就整段覆蓋，一次輸出格式
+> 跑掉或忘記帶入舊人設，累積最久、最難重建的【核心性格】就永久消失（見
+> `memory_sys_design.md` §10「尚未處理的風險」）。
+
+### 11.1 三段落各自獨立判斷（`MemoryManager.merge_interaction_notes()`）
+
+| 檢查 | 規則 |
+| :--- | :--- |
+| 格式完整性 | 新輸出缺任一標籤 → 視為異常輸出（截斷/格式跑掉），整份拒絕，保留舊 notes |
+| 疑似遺失偵測 | 【核心性格】【社交關係】新段落字數 < 舊版 × `shrink_ratio`（預設 0.4）→ 該段落保留舊版，其他段落仍正常採用新內容 |
+| 正常演進 | 不觸發上述兩條規則時，三段落皆採用新版（含【近期動態】——本來就該每次滾動更新，不設萎縮保護） |
+
+`MemoryManager.parse_interaction_notes(text)` 負責用 regex 解析出三個標籤內容，缺少的標籤回傳空字串，供上述比對使用。
+
+### 11.2 一版快照（`interaction_notes_prev` / `interaction_notes_prev_at`）
+
+`user_profiles` 新增兩個欄位（`db.py` 動態 `ALTER TABLE` 遷移，非 `SCHEMA_VERSION` 大版本遷移，比照 `aliases` 欄位的既有模式）。`ai/memory_extractor.py` 的 `_safe_apply_updates()` 在 notes **實際被換掉**、且舊版非空時才更新快照，避免每次無變化的提煉把快照往前推一格。只保留一版（非完整歷史），只能挽救最近一次覆蓋——這是刻意的取捨，換取實作簡單。
+
+### 11.3 還原：CLI-only，刻意不做 Discord 指令
+
+`MemoryManager.restore_interaction_notes(user_id)` 將目前版本與快照**互換**（而非單向覆蓋），因此天然可逆——重複執行會來回切換，誤操作可立即復原，不需要「復原復原」的額外機制。走 `apply_profile_update()` 的 per-user 鎖，避免與背景提煉並發覆寫。
+
+只透過 `main.py` 的 CLI 參數提供：
+
+```bash
+python main.py --view-notes USER_ID       # 唯讀查看目前版本與上一版快照
+python main.py --restore-notes USER_ID    # 還原（互換），完成後直接結束
+```
+
+比照既有的 `--clear-memory`/`--clear-history`/`--clear-profiles` 慣例——這個專案裡「直接覆寫使用者長期資料」的破壞性操作向來只在 CLI 層，從未開放成 Discord 指令。安全邊界落在「能操作主機、啟動程式的人」，比 Discord 的 `manage_guild` 權限（`/kurisu-alias` 代他人操作用的那套）更窄：這個操作能查看／覆寫的是另一位使用者的長期人設資料，不該讓任何 Discord 伺服器管理員就能觸及。

@@ -6,7 +6,7 @@
 ![Discord.py](https://img.shields.io/badge/Discord.py-v2.3%2B-5865F2?logo=discord)
 ![Gemini API](https://img.shields.io/badge/Google%20Gemini-3.1%20%2F%202.5-orange?logo=google)
 ![Storage](https://img.shields.io/badge/Storage-SQLite3%20FTS5-003B57?logo=sqlite)
-![Tests](https://img.shields.io/badge/Tests-68%2F68%20Passed-brightgreen?logo=pytest)
+![Tests](https://img.shields.io/badge/Tests-89%2F89%20Passed-brightgreen?logo=pytest)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
 **基於 Google Gemini 與三層記憶架構打造的擬真傲嬌 Discord 群友機器人**
@@ -32,6 +32,10 @@
 **三軌事實檢索**：事實累積超過配額時，以三條軌道併選——**熱度**（標誌性人設常駐）、**話題**（聊到什麼喚醒什麼）、**最新**（近況不被舊事實淹沒）。
 
 **記憶保護**：事實採增量聯集，模型回傳空值時舊記憶 100% 保留；重複確認會加權熱度；**新事實否定舊事實時自動取代**（例如「我已經不喜歡台北了」會推翻舊的「喜歡台北」，而非誤判為重複確認）；`remove_facts` 需達最低引述門檻才執行，避免籠統的刪除詞誤刪無關事實。
+
+**事實容量控制與語意去重**：每人事實數有硬上限（`facts_maintenance.max_stored_per_user`），超過時依熱度與最後使用時間**決定性淘汰**低價值事實，保證不會無限增長。背景批次另外用 embedding 分群 + Gemini 判斷「是否為同一事實」，合併純粹措辭不同的重複項——只做集合式的保留/捨棄，不做會丟失具體資訊的歸納摘要，降低硬上限需要犧牲真實事實的頻率。詳見 [`doc/spec.md`](doc/spec.md)。
+
+**互動印象保護**：模型每次提煉會整段輸出【核心性格】【社交關係】【近期動態】三段式互動印象。系統會逐段比對——新段落若字數大幅萎縮（低於舊版 40%）視為疑似遺失，該段落保留舊版；輸出格式不完整（缺標籤）則整份拒絕。每次實際覆蓋前都會保留一版快照，可用 CLI 查看或還原（見下方「命令列參數」）。
 
 **中文檢索**：FTS5 預設分詞器會把整串中文視為單一 token，因此索引與查詢兩側都由應用層以 n-gram 切詞，確保「拉麵」「通宵」這類二字詞能正常召回。
 
@@ -156,6 +160,13 @@ memory:
     enable_alias_learning: true    # 是否讓提煉自動學習綽號
     max_aliases_per_user: 5
 
+  facts_maintenance:
+    max_stored_per_user: 60        # 每人事實硬上限，超過依熱度/最後使用時間淘汰
+    enable_dedup: true             # 是否啟用背景語意去重批次
+
+  interaction_notes_protection:
+    shrink_ratio: 0.4              # 核心性格/社交關係段落低於舊版此比例視為疑似遺失
+
 music:
   enable_music_suggestion: true
   play_command: "/play"            # 換音樂 bot 時只要改這裡
@@ -189,14 +200,20 @@ python main.py
 | `--clear-history` | 僅清對話歷史，**保留畫像與好感度** |
 | `--clear-profiles` | 僅清群友畫像，保留歷史 |
 | `--only-clear` | 清理後直接結束，不啟動 Bot |
+| `--view-notes USER_ID` | 唯讀查看指定使用者目前的互動印象與上一版快照，執行後直接結束 |
+| `--restore-notes USER_ID` | 將指定使用者的互動印象**還原為上一版快照**（與目前版本互換，可重複執行來回切換），執行後直接結束 |
 
 ```bash
 python main.py --help                          # 查看說明
 python main.py --clear-memory --only-clear     # 完全重置後結束
 python main.py --clear-history                 # 清歷史後啟動
+python main.py --view-notes 123456789012345678     # 查看某人目前互動印象與上一版快照
+python main.py --restore-notes 123456789012345678  # 還原為上一版（誤操作可再執行一次切回）
 ```
 
-> ⚠️ 這些操作**不可逆且無確認提示**。`--clear-profiles` 會抹掉所有累積的事實、綽號與好感度——那是重建成本最高的資料。
+> ⚠️ `--clear-*` 系列操作**不可逆且無確認提示**。`--clear-profiles` 會抹掉所有累積的事實、綽號與好感度——那是重建成本最高的資料。
+>
+> `--view-notes` / `--restore-notes` 刻意只做成 CLI 參數，**不開放 Discord 指令**：這兩個操作能直接查看／覆寫另一位使用者的長期人設資料，安全邊界應落在能操作主機、啟動程式的人身上，而不是任何 Discord 伺服器管理員權限（`manage_guild`）能觸及的範圍。`--restore-notes` 本身設計成與目前版本**互換**而非單向覆蓋，因此天然可逆，誤還原可再執行一次切回。
 
 ### 自動化測試
 
@@ -204,7 +221,7 @@ python main.py --clear-history                 # 清歷史後啟動
 python test/tests_verify.py
 ```
 
-68 項測試，涵蓋時間解析、記憶檢索、跨使用者歸屬、事實保護與否定推翻、綽號校驗、語音在場解析、Burst 聚合、指令註冊與顏文字渲染。
+89 項測試，涵蓋時間解析、記憶檢索、跨使用者歸屬、事實保護與否定推翻、事實容量控制與語意去重、互動印象保護、綽號校驗、語音在場解析、Burst 聚合、指令註冊與顏文字渲染。
 
 > 測試直接以指令稿執行——`test/` 沒有 `__init__.py`，不能用 `python -m unittest`。
 
@@ -285,6 +302,7 @@ friend-bot/
 | [`emotion_kaomoji.md`](doc/emotion_kaomoji.md) | 標籤渲染與防重複 |
 | [`commands.md`](doc/commands.md) | 指令、Mixin 架構、權限模型 |
 | [`configuration.md`](doc/configuration.md) | 設定層級、日誌、資料庫遷移 |
+| [`spec.md`](doc/spec.md) | 事實容量控制、語意去重、互動印象保護的完整功能規格 |
 
 ### 問題記錄（為什麼會變成這樣）
 

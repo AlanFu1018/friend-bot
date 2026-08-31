@@ -139,6 +139,10 @@ FACTS_DEDUP_CLUSTER_MAX_SIZE: int = int(_facts_maint_cfg.get("dedup_cluster_max_
 FACTS_EMBEDDING_MODEL: str = str(_facts_maint_cfg.get("embedding_model", "gemini-embedding-001"))
 FACTS_DEDUP_SWEEP_INTERVAL_SECONDS: float = float(_facts_maint_cfg.get("dedup_sweep_interval_seconds", 1800))
 
+# 7.03 互動印象保護 (Interaction Notes Protection) 設定
+_notes_protect_cfg = _mem_cfg.get("interaction_notes_protection", {})
+INTERACTION_NOTES_SHRINK_RATIO: float = float(_notes_protect_cfg.get("shrink_ratio", 0.4))
+
 # 7.05 別名 (Alias) 設定
 _alias_cfg = _mem_cfg.get("alias", {})
 ENABLE_ALIAS_LEARNING: bool = bool(_alias_cfg.get("enable_alias_learning", True))
