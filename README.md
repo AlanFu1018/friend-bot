@@ -6,13 +6,14 @@
 ![Discord.py](https://img.shields.io/badge/Discord.py-v2.3%2B-5865F2?logo=discord)
 ![Gemini API](https://img.shields.io/badge/Google%20Gemini-3.1%20%2F%202.5-orange?logo=google)
 ![Storage](https://img.shields.io/badge/Storage-SQLite3%20FTS5-003B57?logo=sqlite)
-![Tests](https://img.shields.io/badge/Tests-19%2F19%20Passed-brightgreen?logo=pytest)
+![Tests](https://img.shields.io/badge/Tests-68%2F68%20Passed-brightgreen?logo=pytest)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
-**基於 Google Gemini 2.5 / 3.1 與三層記憶架構打造的極致擬真傲嬌 Discord 群友機器人**  
-*具備三軌事實檢索 (3-Track Fact RAG & Heat)、情緒標籤動態渲染 (Tag & Replace)、深層歷史回憶、動態好感度階梯、多人群聊短時熱絡 (Burst) 引用回覆、自訂前綴繞過 (Ignore Prefixes)、即時聯網搜尋、獨立定時鬧鐘與 Webhook 行事曆排程系統。*
+**基於 Google Gemini 與三層記憶架構打造的擬真傲嬌 Discord 群友機器人**
 
-[📖 系統架構與技術實作說明書](doc/system_architecture_and_implementation.md) ｜ [🧠 三軌事實與記憶架構](doc/rag_mem.md) ｜ [💖 好感度系統設計](doc/persona_favorability_plan.md) ｜ [💬 Burst 引用回覆設計](doc/multi_user_burst_reply_plan.md)
+*具備跨對話長期記憶、多人身分識別與綽號辨識、三軌事實檢索、情緒顏文字渲染、動態好感度階梯、多人群聊聚合引用回覆、即時聯網搜尋、定時鬧鐘與 Webhook 行事曆，以及語音頻道感知的音樂推薦。*
+
+[📖 系統架構總覽](doc/architecture.md) ｜ [🧠 記憶系統設計](doc/memory_sys_design.md) ｜ [⚙️ Prompt 組裝管線](doc/prompt_pipeline.md) ｜ [📚 完整文件索引](doc/architecture.md#2-功能模組與規格書)
 
 </div>
 
@@ -20,240 +21,199 @@
 
 ## 🌟 核心特色 (Key Features)
 
-- 🎭 **真實傲嬌群友 (Living Persona)**：深度沉浸於《命運石之門》牧瀨紅莉棲（Makise Kurisu）人設，具備傲嬌、口是心非、重感情但理智聰慧的語氣。支援讀取外部 [`config/persona.md`](config/persona.md) 自由調整。
-- 🎨 **情緒標籤動態渲染系統 (Tag & Replace Engine)**：
-  - 模型透過隱藏標籤 `[emotion:tsundere]`、`[emotion:shock]`、`[emotion:sigh]`、`[emotion:sad]`、`[emotion:depressed]` 等輸出心情。
-  - 後台程式自動從獨立顏文字庫 [`config/kaomoji.yaml`](config/kaomoji.yaml) 智慧隨機抽取 2ch / 日系表情。
-  - **防連續重複機制 (Anti-Consecutive Repetition)**：自動過濾近期使用過的表情，確保顏文字永遠豐富生動、絕不重複死板！
-- 💖 **動態好感度與人際進展 (Favorability & Progression)**：
-  - **4 階關係階級**：`Tier 1: 陌生警戒 (0~19)` ➔ `Tier 2: 熟識群友 (20~49)` ➔ `Tier 3: 實驗室夥伴 (50~79)` ➔ `Tier 4: 靈魂共鳴 (80~100)`。
-  - **傲嬌防線動態變化**：隨好感度提升，防線變薄、極易破防害羞臉紅、主動關心作息。
-  - **隱密更新與每日防刷**：聊天中絕無系統提示打擾，單日加分上限（預設 +5）杜絕洗頻刷分，僅透過 `/kurisu-profile` 可視覺化查看進度條。
-- 💬 **多人群聊短時熱絡 (Burst) 與動態引用回覆**：
-  - 當短時間（4.5秒窗口）內有 2 人以上發言時，自動啟動 Burst 聚合。
-  - AI 智慧挑選核心吐槽/回應對象，採用 **Discord 原生引用回覆 (`target.reply`)** 發送，既精準回應核心對象，又順手接住其他在場群友的話題！
-- 🛡️ **自訂前綴繞過監聽與回覆 (Ignore Prefixes)**：
-  - 支援設定前綴（預設 `["#", "＃", "//"]`），以該前綴開頭的訊息將完全被機器人忽略：**不監聽、不寫入資料庫、不提煉特徵、不觸發回覆**，方便群友進行內部交流或旁白備註。
-- 🧠 **三層全記憶與三軌事實檢索 (3-Track Fact RAG & Heat)**：
-  - **第 1 層（短期對話）**：頻道滑動窗口。
-  - **第 2 層（用戶畫像 & 三軌事實檢索）**：
-    - **軌道 1 (Heat)**：常駐核心高頻事實。
-    - **軌道 2 (RAG)**：即時話題語意檢索命中事實（具備 1 小時命中加權冷卻）。
-    - **軌道 3 (Recent)**：最新動態近況事實。
-    - 支援跨用戶歸屬、事實防洗白增量保護、背景提煉重複確認加權 (`hits += 3`) 與 `remove_facts` 事實修正。
-  - **第 3 層（深層回憶）**：基於 SQLite FTS5 全文檢索，自動檢索過去相關話題與歷史記憶。
-  - **監聽頻道記憶改良（方案 C）**：支援防抖緩衝隊列與 JIT 按需統合提煉，API 費用節省 85% 以上。
-- 🔍 **即時聯網搜尋 (Real-Time Web Search)**：整合 DuckDuckGo 與 Jina AI Reader，即時檢索最新時事、新聞與天氣，並以紅莉棲口吻整理輸出。
-- ⏰ **獨立定時鬧鐘 (Alarm Reminder)**：支援各類自然時間格式設定提醒，到期時在頻道發送專屬傲嬌對白與醒目卡片。
-- 📅 **Webhook 行事曆與智慧行程查詢 (Calendar & Natural Scheduling)**：
-  - 支援設定個人行事曆與自訂 Webhook 推送。
-  - **支援日常直接對話查詢**：在聊天時問「*我今天有什麼行程？*」或「*幫我看明天有安排嗎？*」，紅莉棲會自動檢索行事曆並為你解答！
-- 🗣️ **擬真群友行為 (Multi-Bubble Typing)**：長回覆自動切分自然氣泡並模擬打字等待時間，告別冰冷的大段機器人輸出。
+### 🧠 三層長期記憶
+
+| 層 | 內容 |
+| :--- | :--- |
+| **第 1 層** 短期對話 | 該頻道最近 N 則訊息的滑動窗口 |
+| **第 2 層** 長期畫像 | 事實、綽號、互動印象、好感度（永久保存） |
+| **第 3 層** 深度回憶 | SQLite FTS5 跨頻道全文檢索，自動聯想過去話題 |
+
+**三軌事實檢索**：事實累積超過配額時，以三條軌道併選——**熱度**（標誌性人設常駐）、**話題**（聊到什麼喚醒什麼）、**最新**（近況不被舊事實淹沒）。
+
+**記憶保護**：事實採增量聯集，模型回傳空值時舊記憶 100% 保留；重複確認會加權熱度；**新事實否定舊事實時自動取代**（例如「我已經不喜歡台北了」會推翻舊的「喜歡台北」，而非誤判為重複確認）；`remove_facts` 需達最低引述門檻才執行，避免籠統的刪除詞誤刪無關事實。
+
+**中文檢索**：FTS5 預設分詞器會把整串中文視為單一 token，因此索引與查詢兩側都由應用層以 n-gram 切詞，確保「拉麵」「通宵」這類二字詞能正常召回。
+
+### 👥 多人身分識別
+
+四個來源決定「這段對話牽涉到誰」：
+
+| 來源 | 說明 | 進 Prompt | 可被寫入事實 |
+| :--- | :--- | :---: | :---: |
+| 發言者 | Discord author id | ✅ | ✅ |
+| @提及 | `message.mentions`（權威來源） | ✅ | ✅ |
+| 名稱／**綽號** | 顯示名稱 ∪ 別名 | ✅ | ✅ |
+| 語音／文字在場者 | 同語音頻道、近期發言者 | ✅ | ❌ |
+
+**讀寫不對稱是刻意的**：讀錯只是一次回覆變差，寫錯是把事實永久記到別人頭上。同名一律排除不猜；模型輸出的 `user_id` 不在對話上下文內一律拒絕（防提示詞注入）。
+
+### 🏷️ 綽號辨識 (Alias)
+
+Discord 顯示名稱往往不是群友實際互稱的稱呼。系統可從對話中**自動學習綽號**，須通過五道校驗才生效（格式合格、不與任何既有名稱碰撞、當事人須在場、數量上限、**記錄來源可稽核**）。也可用 `/kurisu-alias` 手動管理。
+
+### 🎭 人格與好感度
+
+- 人設讀取外部 [`config/persona.md`](config/persona.md)，改人格不需動程式碼。
+- **4 階關係階級**：`Tier 1 陌生警戒 (0~19)` → `Tier 2 熟識群友 (20~49)` → `Tier 3 實驗室夥伴 (50~79)` → `Tier 4 靈魂共鳴 (80~100)`，逐人注入，同一次回覆可對不同人展現不同親密度。
+- **隱密更新與每日防刷**：對話中絕無系統提示，好感度僅能透過 `/kurisu-profile` 查看。
+
+### 🎨 情緒顏文字渲染
+
+模型輸出 `[emotion:tsundere]` 這類標籤，程式從 [`config/kaomoji.yaml`](config/kaomoji.yaml) 的十大類顏文字庫隨機抽取。**防連續重複機制**確保一個顏文字要等該類別其他一半的選項用過才可能再出現。
+
+### 💬 多人群聊聚合與動態引用
+
+短時間內 2 人以上發言時自動聚合，模型挑選核心回應對象並以 **Discord 原生引用回覆**發送，兼顧其他在場群友的話題。
+
+### 🎵 語音頻道感知與音樂推薦
+
+發言人在語音頻道時，紅莉栖知道誰和他在一起，聊到音樂時會**結合在場者的已知喜好**推薦歌曲並附上可複製的指令。
+
+> ⚠️ Discord API **不允許 bot 呼叫另一個 bot 的 Slash 指令**，因此這裡只做「建議」——實際播放需群友自行執行指令。詳見 [`doc/music_suggestion.md`](doc/music_suggestion.md)。
+
+### 🔍 即時聯網搜尋
+
+DuckDuckGo 檢索 + Jina AI Reader 抓取網頁正文的兩段式流程。模型可自主判斷需要時調用，或用 `/kurisu-search` 強制觸發。
+
+### ⏰ 定時鬧鐘與 📅 Webhook 行事曆
+
+兩套獨立系統。鬧鐘是一次性提醒；**行事曆會進入對話上下文**——可直接在聊天中問「我明天有什麼安排？」。時間格式支援相對時間（`10m`、`1h30m`）與各種絕對格式（`2026/8/27/15/30`、`15:30`、`2026年8月27日15點30分`）。
+
+### 🛡️ 前綴繞過
+
+以 `#`、`＃`、`//` 開頭的訊息**完全被忽略**：不監聽、不入庫、不提煉、不回覆，方便群友內部交流或旁白備註。
 
 ---
 
-## ⚡ Slash 斜線指令清單 (Slash Commands)
+## ⚡ Slash 指令清單
 
-紅莉棲支援完整的模組化 Discord Slash 指令，隨時為實驗室夥伴提供貼心服務：
-
-| 指令 | 參數 | 說明 | 範例 |
-| :--- | :--- | :--- | :--- |
-| `/kurisu-help` | 無 | 查看紅莉棲的所有可用指令與系統功能介紹卡片 | `/kurisu-help` |
-| `/kurisu-search` | `query` (必填) | 讓紅莉棲利用 DuckDuckGo 與 Jina AI Reader 進行即時聯網搜尋並整理回覆 | `/kurisu-search query:命運石之門重製版` |
-| `/kurisu-profile` | `user` (選填) | 查看自己或指定群友在紅莉棲心中的好感度進度條、關係階級與長期特徵記憶 | `/kurisu-profile` 或 `/kurisu-profile user:@岡部` |
-| `/kurisu-alarm-set` | `time` (必填), `content` (必填) | 設定定時提醒鬧鐘（支援相對時間 `10m`、`2h` 或絕對時間 `14:30`、`2026-08-29 18:00`） | `/kurisu-alarm-set time:30m content:召開作戰會議` |
-| `/kurisu-alarm-list` | 無 | 檢視個人所有尚未觸發的進行中鬧鐘清單 | `/kurisu-alarm-list` |
-| `/kurisu-alarm-cancel` | `alarm_id` (必填) | 取消指定的定時鬧鐘提醒 | `/kurisu-alarm-cancel alarm_id:1` |
-| `/kurisu-calendar-set` | `time` (必填), `content` (必填) | 新增個人行事曆事件，到期自動由 Webhook 推送提醒卡片 | `/kurisu-calendar-set time:2026-08-29 15:00 content:研討會報告` |
-| `/kurisu-calendar-list` | `date` (選填) | 查看個人排程清單（可指定日期如 `2026-08-29` 查詢當日行程） | `/kurisu-calendar-list date:2026-08-29` |
-| `/kurisu-calendar-cancel` | `event_id` (必填) | 取消指定的行事曆排程事件 | `/kurisu-calendar-cancel event_id:2` |
+| 指令 | 參數 | 說明 |
+| :--- | :--- | :--- |
+| `/kurisu-help` | 無 | 查看所有可用指令與功能介紹 |
+| `/kurisu-profile` | `user`（選填） | 查看自己或群友的好感度、關係階級與長期特徵；指定 bot 自己則顯示人設卡 |
+| `/kurisu-alias` | `action`（必填）、`alias`、`user` | 管理綽號：`add` / `remove` / `list`。代他人操作需管理伺服器權限 |
+| `/kurisu-search` | `query`（必填） | 強制聯網搜尋並以紅莉栖口吻整理回覆 |
+| `/kurisu-alarm-set` | `time`、`content` | 設定定時提醒鬧鐘 |
+| `/kurisu-alarm-list` | 無 | 檢視個人所有待觸發鬧鐘 |
+| `/kurisu-alarm-cancel` | `alarm_id` | 取消指定鬧鐘 |
+| `/kurisu-calendar-set` | `time`、`content`、`webhook_url`（選填） | 登記行事曆排程，到期由 Webhook 推送 |
+| `/kurisu-calendar-list` | 無 | 查看未來一個月的排程清單 |
+| `/kurisu-calendar-cancel` | `event_id` | 取消指定排程 |
 
 ---
 
-## 🛠️ 安裝與快速開始 (Quick Start)
+## 🛠️ 安裝與快速開始
 
 ### 1. 環境需求
-* **Python 3.10 / 3.11 / 3.12**
-* **Google Gemini API Key**（推薦使用 Gemini 3.1 Flash-Lite 或 2.5 Flash）
-* **Discord Bot Token**（需於 Discord Developer Portal 開啟 `MESSAGE CONTENT INTENT`）
 
-### 2. 下載與安裝依賴
+* **Python 3.10 / 3.11 / 3.12**
+* **Google Gemini API Key**
+* **Discord Bot Token**——需於 Discord Developer Portal 開啟 `MESSAGE CONTENT INTENT`
+
+> 語音頻道感知所需的 `voice_states` intent 已內含於 `Intents.default()`，**不需額外開啟**。
+
+### 2. 下載與安裝
 
 ```bash
-# 複製專案
 git clone https://github.com/AlanFu1018/friend-bot.git
 cd friend-bot
 
-# 建立並啟用虛擬環境 (可選但推薦)
 python -m venv venv
-# Windows:
-.\venv\Scripts\activate
-# Linux / macOS:
-source venv/bin/activate
+.\venv\Scripts\activate          # Windows
+source venv/bin/activate         # Linux / macOS
 
-# 安裝所需 Python 套件
 pip install -r requirements.txt
 ```
 
----
-
-### 3. 環境變數設定 (`.env`)
-
-在專案根目錄下建立或修改 `.env` 檔案：
+### 3. 環境變數 (`.env`)
 
 ```env
-# Discord 機器人 Token
 DISCORD_TOKEN=your_discord_bot_token_here
-
-# Google Gemini API 金鑰
 GEMINI_API_KEY=your_google_gemini_api_key_here
+
+# 選填：頻道 ID 也可寫在這裡（與 config.yaml 取聯集，而非覆蓋）
+# REPLY_CHANNEL_IDS=123456789012345678
+# LISTEN_CHANNEL_IDS=112233445566778899
 ```
 
----
+### 4. 主要設定 (`config/config.yaml`)
 
-### 4. 設定檔詳細說明 (`config/config.yaml`)
-
-主要設定檔位於 [`config/config.yaml`](config/config.yaml)，各項參數功能如下：
+設定檔本身有完整的中文註解說明每一項的作用與調整取捨，這裡只列最常調整的幾項。完整參考見 [`doc/configuration.md`](doc/configuration.md)。
 
 ```yaml
-# Discord 機器人頻道與行為設定
 bot:
-  # 【互動與回覆頻道】機器人會在此發言聊天的專屬頻道 ID 列表（留空 [] 代表全部頻道）
-  reply_channel_ids: [1542526624979878019]
+  reply_channel_ids: []            # 會回覆的頻道（留空則不回覆任何頻道）
+  listen_channel_ids: []           # 只記錄不回覆的頻道
 
-  # 【純監聽與記憶頻道】機器人會默默旁聽記錄、提取用戶畫像，但「不會主動回覆」的頻道 ID 列表
-  listen_channel_ids: [935055001062088724, 1455531125589151899]
-  
-  # 是否在生成回覆時顯示「正在輸入... (Typing)」狀態
-  show_typing: true
-  
-  # 單則 Discord 訊息最大字元數 (Discord 上限為 2000)
-  max_message_length: 2000
-
-# 訊息發送、自然氣泡與多人 Burst 聚合行為
-chat_behavior:
-  # 略過前綴（以這些前綴開頭的訊息不監聽、不記錄、不回覆）
-  ignore_prefixes: ["#", "＃", "//"]
-  enable_multi_bubble: true        # 是否開啟多氣泡分段發送
-  bubble_target_length: 47         # 單則氣泡目標字數（到達時尋找標點符號切分）
-  typing_delay_range: [0.6, 1.3]   # 多氣泡之間的打字停頓時間範圍（秒）
-  
-  # 多人群聊短時熱絡 (Burst) 聚合與動態引用回覆
-  burst_reply:
-    enable_burst_reply: true       # 是否啟用短時多人發言聚合與動態引用
-    window_seconds: 4.5            # 短時收集窗口（秒）
-    min_user_count: 2              # 觸發門檻（>= 2 人連續發言）
-    max_burst_messages: 5          # 單次最多累積訊息上限
-
-# 動態好感度與人際進展 (Favorability & Progression)
-favorability:
-  enable_favorability: true        # 是否啟用好感度系統
-  default_favorability: 30         # 新用戶預設起始分數 (0~100)
-  daily_gain_limit: 5              # 單日好感度增加上限（防刷保護）
-  daily_loss_limit: 10             # 單日好感度扣分上限
-
-# 聯網即時搜尋 (Web Search Tool)
-web_search:
-  enable_web_search: true          # 是否啟用即時聯網檢索
-  search_top_k: 3                  # 搜尋抓取前 N 個網頁
-  max_content_length_per_page: 2500 # 單一網頁抓取最大字元數
-
-# 行事曆與 Webhook 定時提醒
-calendar:
-  webhook_url: ""                  # 全域預設 Webhook URL (選填)
-  avatar_url: ""                   # Webhook 顯示的紅莉棲頭像 URL (選填)
-
-# Gemini AI 模型設定
-gemini:
-  model: "gemini-3.1-flash-lite"   # 預設使用的 Gemini 模型
-  temperature: 0.88                # 溫度值 (0.0 ~ 2.0)
-  frequency_penalty: 0.0           # 懲罰設定 (預設 0.0)
-  presence_penalty: 0.0
-  max_output_tokens: 2048
-
-# 三層全記憶系統
 memory:
-  short_term_history_limit: 15     # 第 1 層短期記憶訊息數量
-  enable_auto_memory_extraction: true # 第 2 層是否自動提取群友畫像
-  
-  # 三軌事實檢索配額與加權設定
-  facts_rag:
-    speaker_max_total: 8           # 主要發言者帶入事實上限
-    speaker_heat_limit: 2          # 軌道 1：核心高頻事實數量
-    speaker_recent_limit: 2        # 軌道 3：最新近況事實數量
-    others_max_total: 3            # 其他在場群友帶入事實上限
-    others_heat_limit: 1           # 軌道 1：核心高頻事實數量
-    others_recent_limit: 1         # 軌道 3：最新近況事實數量
-    rag_hit_cooldown_seconds: 3600 # RAG 命中加權冷卻（秒）
-    extraction_reaffirm_bonus: 3   # 提煉重複確認加權 (hits += 3)
-    rag_hit_bonus: 1               # 即時話題命中加權 (hits += 1)
+  short_term_history_limit: 30     # 送入 Prompt 的近期訊息數
+  listen_debounce_seconds: 4.0     # 監聽頻道靜默多久才打包提煉
+  listen_max_queue_messages: 30    # 佇列滿此數量即提煉（防抖的保險）
+  history_recall_min_score: 2      # 深度回憶門檻：至少共享一個二字詞
 
-  enable_history_recall: true      # 第 3 層是否啟用 FTS5 深度歷史回憶
-  history_recall_limit: 4          # 深度回憶檢索數量上限
-  db_path: "data/friend_bot.db"    # 本地 SQLite 資料庫路徑
+  alias:
+    enable_alias_learning: true    # 是否讓提煉自動學習綽號
+    max_aliases_per_user: 5
+
+music:
+  enable_music_suggestion: true
+  play_command: "/play"            # 換音樂 bot 時只要改這裡
+
+favorability:
+  default_favorability: 30
+  daily_gain_limit: 15             # 每日加分上限（防刷）
+
+gemini:
+  model: "gemini-3.1-flash-lite"
+  temperature: 0.87
 ```
+
+> **調參建議**：`listen_debounce_seconds` 是提升監聽頻道歸屬品質最有效的旋鈕——調大能讓模型一次看到更完整的多輪脈絡（「A 問鍵盤型號、B 隔兩分鐘回答」這種因果才接得起來）。已有則數上限兜底，可放心調整。
 
 ---
 
-## 🚀 啟動與運行方式 (Running the Bot)
-
-### 1. 本地標準啟動
+## 🚀 啟動與運行
 
 ```bash
 python main.py
 ```
 
----
+首次啟動會自動建立資料庫並執行必要的 schema 遷移（`PRAGMA user_version`），log 會顯示進度。
 
-### 2. 命令列 (CLI / CMD) 參數說明
+### 命令列參數
 
-`main.py` 內建命令列參數，方便管理員在啟動時或維護期間進行記憶體維護與清理操作：
-
-| 參數 | 說明 | 適用情境 |
-| :--- | :--- | :--- |
-| `--clear-memory` | **清空所有記憶**（包含所有頻道的對話歷史與所有群友的長期特徵畫像） | 完全重置機器人記憶狀態 |
-| `--clear-history` | **僅清空對話歷史**（保留用戶長期特徵畫像與好感度） | 頻道發言紀錄過於冗長時進行瘦身 |
-| `--clear-profiles` | **僅清空用戶特徵畫像**（保留歷史對話紀錄） | 重新提煉並建立群友長期畫像 |
-| `--only-clear` | **僅執行清理**（執行完指定的清理動作後直接結束程式，不連線啟動 Bot） | 配合 Cron 或維護腳本進行批次記憶維護 |
-
-#### 常用命令範例：
+| 參數 | 說明 |
+| :--- | :--- |
+| `--clear-memory` | 清空**所有**記憶（對話歷史 + 群友畫像 + 行事曆 + 鬧鐘） |
+| `--clear-history` | 僅清對話歷史，**保留畫像與好感度** |
+| `--clear-profiles` | 僅清群友畫像，保留歷史 |
+| `--only-clear` | 清理後直接結束，不啟動 Bot |
 
 ```bash
-# 查看所有命令列參數說明
-python main.py --help
-
-# 僅清空所有對話歷史與畫像，不啟動機器人
-python main.py --clear-memory --only-clear
-
-# 清空對話歷史後直接連線啟動機器人
-python main.py --clear-history
-
-# 僅清空群友畫像（重新開始建立好感度與特徵），不啟動機器人
-python main.py --clear-profiles --only-clear
+python main.py --help                          # 查看說明
+python main.py --clear-memory --only-clear     # 完全重置後結束
+python main.py --clear-history                 # 清歷史後啟動
 ```
 
----
+> ⚠️ 這些操作**不可逆且無確認提示**。`--clear-profiles` 會抹掉所有累積的事實、綽號與好感度——那是重建成本最高的資料。
 
-### 3. 執行全自動化測試套件
-
-專案包含覆蓋全功能模組的自動化驗證測試（鬧鐘、行事曆、三軌 RAG、好感度、Burst 聚合、情緒標籤渲染與前綴略過）：
+### 自動化測試
 
 ```bash
 python test/tests_verify.py
 ```
 
----
+68 項測試，涵蓋時間解析、記憶檢索、跨使用者歸屬、事實保護與否定推翻、綽號校驗、語音在場解析、Burst 聚合、指令註冊與顏文字渲染。
 
-### 4. 雲端主機背景常駐部署 (Oracle Cloud / Ubuntu / Debian)
+> 測試直接以指令稿執行——`test/` 沒有 `__init__.py`，不能用 `python -m unittest`。
 
-在雲端伺服器（如 OCI、AWS、GCP）上，建議使用 **`systemd`** 實現背景守護與重開機自動啟動：
+### 雲端背景常駐 (systemd)
 
-#### ① 建立 systemd 服務檔
 ```bash
 sudo nano /etc/systemd/system/friend-bot.service
 ```
 
-#### ② 寫入以下設定（請依實際路徑與使用者修改）：
 ```ini
 [Unit]
 Description=Friend-Bot Discord Service (Makise Kurisu)
@@ -272,68 +232,69 @@ Environment=PYTHONUNBUFFERED=1
 WantedBy=multi-user.target
 ```
 
-#### ③ 啟用並啟動服務
 ```bash
-# 重新載入設定
 sudo systemctl daemon-reload
-
-# 設定開機自動啟動
 sudo systemctl enable friend-bot
-
-# 立即啟動
 sudo systemctl start friend-bot
-
-# 查看即時日誌
-sudo journalctl -u friend-bot -f
+sudo journalctl -u friend-bot -f      # 查看即時日誌
 ```
 
 ---
 
-## 📁 專案結構與文件導覽 (Directory Structure & Docs)
+## 📁 專案結構
 
 ```
 friend-bot/
 ├── config/
-│   ├── config.yaml                        # 核心設定檔 (頻道、模型、記憶、好感度、行為、ignore_prefixes)
-│   ├── kaomoji.yaml                       # 🎨 獨立 2ch / 日系顏文字庫 (傲嬌、破防、死魚眼、難過、沮喪等 10 大類)
-│   └── persona.md                         # 🎭 牧瀨紅莉棲人設與情緒標籤規範指南
+│   ├── config.yaml            # 核心設定檔（含完整中文註解）
+│   ├── kaomoji.yaml           # 顏文字庫（十大情緒類別）
+│   └── persona.md             # 人設與情緒標籤規範
 ├── data/
-│   └── friend_bot.db                      # 本地 SQLite 資料庫 (訊息、畫像、鬧鐘、行事曆)
-├── doc/                                   # 📚 系統架構與技術實作專題文檔
-│   ├── system_architecture_and_implementation.md # 🏗️ 系統架構與全技術實作說明書
-│   ├── rag_mem.md                         # 🧠 三軌事實檢索 (3-Track Fact RAG & Heat) 設計書
-│   ├── memory_sys_design.md               # 🧠 三層記憶架構與方案 C 監聽提煉設計
-│   ├── persona_favorability_plan.md       # 💖 4 階好感度進展與防刷設計
-│   ├── multi_user_burst_reply_plan.md     # 💬 多人群聊 Burst 與動態引用回覆設計
-│   └── project_plan.md                    # 🗺️ 專案開發進度與里程碑 Roadmap
-├── src/
-│   └── friend_bot/
-│       ├── ai/                            # Gemini Client、Prompt 模組、特徵提煉、搜尋工具
-│       │   ├── prompts.py                 # System Instruction、Context 組裝與 Burst 提示詞
-│       │   ├── gemini_client.py           # Google GenAI SDK 封裝與情緒標籤自動渲染
-│       │   ├── memory_extractor.py        # 背景自動分析提煉用戶特徵與好感度微調
-│       │   └── tools/                     # Web Search 聯網搜尋工具
-│       ├── bot/                           # Discord 客戶端與指令處理
-│       │   ├── client.py                  # FriendBotClient (Slash 指令、Burst 緩衝、忽略前綴與對話處理)
-│       │   ├── handlers.py                # 訊息多氣泡切分與圖片附件處理
-│       │   ├── commands/                  # 模組化 Slash Commands Mixins (Help, Search, Profile, Alarm, Calendar)
-│       │   └── utils/                     # 鬧鐘、行事曆、Burst 與情緒渲染獨立工具庫
-│       │       ├── alarm/                 # ⏰ 定時鬧鐘模組 (Manager, Scheduler, Parser)
-│       │       ├── calendar/              # 📅 行事曆與 Webhook 排程模組 (Manager, Scheduler, Parser)
-│       │       ├── burst/                 # 💬 多人短時熱絡緩衝模組 (BurstBufferManager)
-│       │       └── emotion.py             # 🎨 情緒標籤動態渲染與防重複抽取器 (EmotionReplacer)
-│       ├── memory/                        # 資料庫管理 (db.py, memory_manager.py)
-│       └── core/                          # 設定載入與 Logger 工具
-├── test/
-│   └── tests_verify.py                    # 🧪 19 項全自動化單元測試腳本 (100% Passed)
-├── .env                                   # 敏感 Token 與 API Key
-├── requirements.txt                       # Python 相依套件列表
-├── main.py                                # 程式啟動入口 (含 CLI / CMD 記憶管理參數)
-└── README.md                              # 專案說明文件
+│   └── friend_bot.db          # SQLite（訊息、畫像、鬧鐘、行事曆）
+├── doc/                       # 📚 規格書與問題記錄，見下方
+├── src/friend_bot/
+│   ├── core/                  # config.py、logger.py、emotion.py（顏文字渲染）
+│   ├── memory/                # db.py（schema 與遷移）、memory_manager.py（三層記憶核心）
+│   ├── ai/                    # gemini_client.py、prompts.py、memory_extractor.py、tools/
+│   └── bot/                   # client.py（主流程）、handlers.py
+│       ├── commands/          # Slash 指令 Mixin
+│       └── utils/             # burst/、alarm/、calendar/
+├── test/tests_verify.py       # 68 項自動化測試
+├── main.py                    # 啟動入口（含 CLI 記憶管理參數）
+└── requirements.txt
 ```
+
+各層依賴方向是**嚴格單向**的 `bot → ai → memory → core`，任何一層都可單獨匯入。
 
 ---
 
-## 📄 開源授權 (License)
+## 📚 文件導覽
+
+### 規格書（現在怎麼運作）
+
+| 文件 | 內容 |
+| :--- | :--- |
+| [`architecture.md`](doc/architecture.md) | **入口**——全景架構與模組索引 |
+| [`chat_and_reply.md`](doc/chat_and_reply.md) | 頻道模式、Burst 聚合、多氣泡分段、圖片理解 |
+| [`memory_sys_design.md`](doc/memory_sys_design.md) | 記憶架構與每個設計決定的理由 |
+| [`prompt_pipeline.md`](doc/prompt_pipeline.md) | Prompt 如何組成（執行期細節，含行號） |
+| [`persona_and_favorability.md`](doc/persona_and_favorability.md) | 人格、四階關係、好感度計算 |
+| [`music_suggestion.md`](doc/music_suggestion.md) | 語音頻道感知與音樂推薦 |
+| [`web_search.md`](doc/web_search.md) | 兩段式檢索與 Tool Calling |
+| [`calendar_and_alarm.md`](doc/calendar_and_alarm.md) | 兩套定時系統與時間解析 |
+| [`emotion_kaomoji.md`](doc/emotion_kaomoji.md) | 標籤渲染與防重複 |
+| [`commands.md`](doc/commands.md) | 指令、Mixin 架構、權限模型 |
+| [`configuration.md`](doc/configuration.md) | 設定層級、日誌、資料庫遷移 |
+
+### 問題記錄（為什麼會變成這樣）
+
+| 文件 | 內容 |
+| :--- | :--- |
+| [`mem_sys_bugs.md`](doc/mem_sys_bugs.md) | 記憶系統缺陷清單、實測證據與修復記錄 |
+| [`improv.md`](doc/improv.md) | 並發與安全面的程式碼審查記錄 |
+
+---
+
+## 📄 開源授權
 
 本專案採用 [MIT License](LICENSE) 授權開源。
