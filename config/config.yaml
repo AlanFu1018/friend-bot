@@ -169,6 +169,13 @@ memory:
     # 用於計算事實 embedding 的模型代號。換模型後舊向量會自動判定過期並重算。
     embedding_model: "gemini-embedding-001"
 
+    # 單次 BatchEmbedContents API 呼叫最多送幾筆文字。Gemini API 硬限制是 100，
+    # 超過會整批被 400 INVALID_ARGUMENT 拒絕，所以這裡分批送出。
+    embedding_batch_size: 100
+
+    # 分批呼叫之間刻意等待的秒數，避免連續送出多個批次觸發速率限制。
+    embedding_batch_delay_seconds: 1.0
+
     # 背景語意去重批次的執行間隔秒數。
     dedup_sweep_interval_seconds: 1800
 

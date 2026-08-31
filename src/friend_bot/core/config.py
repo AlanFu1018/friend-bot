@@ -137,6 +137,8 @@ ENABLE_FACTS_DEDUP: bool = bool(_facts_maint_cfg.get("enable_dedup", True))
 FACTS_DEDUP_SIMILARITY_THRESHOLD: float = float(_facts_maint_cfg.get("dedup_similarity_threshold", 0.86))
 FACTS_DEDUP_CLUSTER_MAX_SIZE: int = int(_facts_maint_cfg.get("dedup_cluster_max_size", 6))
 FACTS_EMBEDDING_MODEL: str = str(_facts_maint_cfg.get("embedding_model", "gemini-embedding-001"))
+FACTS_EMBEDDING_BATCH_SIZE: int = int(_facts_maint_cfg.get("embedding_batch_size", 100))
+FACTS_EMBEDDING_BATCH_DELAY_SECONDS: float = float(_facts_maint_cfg.get("embedding_batch_delay_seconds", 1.0))
 FACTS_DEDUP_SWEEP_INTERVAL_SECONDS: float = float(_facts_maint_cfg.get("dedup_sweep_interval_seconds", 1800))
 
 # 7.03 互動印象保護 (Interaction Notes Protection) 設定
