@@ -146,6 +146,32 @@ memory:
   # 本地 SQLite 資料庫儲存路徑（永久保存所有訊息與記憶）
   db_path: "data/friend_bot.db"
 
+  # 【事實容量控制與語意去重 (Facts Capacity & Dedup) 設定】
+  # 機制 A（硬上限淘汰）與機制 B（語意去重）是兩個獨立機制：
+  # A 在每次寫入時同步執行，保證 facts 數量任何時刻都有界；
+  # B 是背景批次的品質優化，透過 embedding 分群 + Gemini 判斷是否為同一事實，
+  # 減少「同一件事、不同講法」造成的假性膨脹，降低 A 需要淘汰真實事實的頻率。
+  facts_maintenance:
+    # 【機制 A】每人事實儲存上限（非檢索配額，是真正寫入 DB 的硬上限）。
+    # 超過時依熱度(hits)由低到高、最後使用時間(last_used_at)由舊到新排序淘汰，
+    # 優先保留熱門與近期事實。這是唯一保證事實數量不會無限增長的機制。
+    max_stored_per_user: 10000
+
+    # 【機制 B】是否啟用背景語意去重批次。
+    enable_dedup: true
+
+    # 分群時的 cosine 相似度門檻（0~1）。超過此值才視為候選重複群組，越高越保守。
+    dedup_similarity_threshold: 0.86
+
+    # 單一群組送進 Gemini 判斷的事實數量上限，避免單次呼叫過大或判斷品質下降。
+    dedup_cluster_max_size: 6
+
+    # 用於計算事實 embedding 的模型代號。換模型後舊向量會自動判定過期並重算。
+    embedding_model: "gemini-embedding-001"
+
+    # 背景語意去重批次的執行間隔秒數。
+    dedup_sweep_interval_seconds: 1800
+
 # 語音頻道感知與音樂推薦 (Music Suggestion) 設定
 music:
   # 是否啟用語音頻道感知與音樂推薦。

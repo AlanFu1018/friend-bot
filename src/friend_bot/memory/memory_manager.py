@@ -23,7 +23,9 @@ from src.friend_bot.core.config import (
     FACTS_RAG_HIT_COOLDOWN_SECONDS,
     FACTS_EXTRACTION_REAFFIRM_BONUS,
     FACTS_RAG_HIT_BONUS,
-    MAX_ALIASES_PER_USER
+    MAX_ALIASES_PER_USER,
+    FACTS_MAX_STORED_PER_USER,
+    FACTS_DEDUP_SIMILARITY_THRESHOLD
 )
 from src.friend_bot.core.logger import get_logger
 
@@ -160,18 +162,23 @@ class MemoryManager:
         if isinstance(facts_raw, list):
             for item in facts_raw:
                 if isinstance(item, dict) and "text" in item:
+                    embedding = item.get("embedding")
                     normalized.append({
                         "text": str(item.get("text", "")).strip(),
                         "hits": int(item.get("hits", 1)),
                         "created_at": int(item.get("created_at", now)),
-                        "last_used_at": int(item.get("last_used_at", now))
+                        "last_used_at": int(item.get("last_used_at", now)),
+                        "embedding": list(embedding) if isinstance(embedding, list) else None,
+                        "embedding_model": str(item.get("embedding_model", ""))
                     })
                 elif isinstance(item, str) and item.strip():
                     normalized.append({
                         "text": item.strip(),
                         "hits": 1,
                         "created_at": now,
-                        "last_used_at": now
+                        "last_used_at": now,
+                        "embedding": None,
+                        "embedding_model": ""
                     })
         elif isinstance(facts_raw, str) and facts_raw.strip():
             try:
@@ -182,7 +189,9 @@ class MemoryManager:
                     "text": facts_raw.strip(),
                     "hits": 1,
                     "created_at": now,
-                    "last_used_at": now
+                    "last_used_at": now,
+                    "embedding": None,
+                    "embedding_model": ""
                 })
         return normalized
 
@@ -297,11 +306,145 @@ class MemoryManager:
         return key_a in key_b or key_b in key_a
 
     @staticmethod
+    def evict_stale_facts(
+        facts_raw: Any,
+        max_total: int = FACTS_MAX_STORED_PER_USER
+    ) -> List[Dict[str, Any]]:
+        """
+        機制 A：硬上限淘汰（決定性規則，保證有界）。
+
+        依 `hits` 由低到高、`last_used_at` 由舊到新排序，超過 `max_total` 的部分裁掉，
+        永遠優先保留熱度最高、最近仍在使用的一批（延續三軌檢索既有的「熱度＝標誌性
+        人設常駐」價值觀）。這是唯一保證 facts 數量不會無限增長的機制——語意去重
+        （見 `group_facts()` / `merge_fact_metadata()`）只是背景品質優化，降低這裡
+        需要淘汰真實事實的頻率，本身不保證有界。
+        """
+        normalized = MemoryManager.normalize_facts(facts_raw)
+        if len(normalized) <= max_total:
+            return normalized
+
+        ordered = sorted(
+            normalized,
+            key=lambda f: (f.get("hits", 1), f.get("last_used_at", 0)),
+            reverse=True
+        )
+        kept = ordered[:max_total]
+        dropped = ordered[max_total:]
+        logger.info(
+            f"🗑️ [事實容量淘汰] 超過上限 {max_total} 條，淘汰 {len(dropped)} 條"
+            f"低熱度／久未使用事實：{[f['text'] for f in dropped]}"
+        )
+        return kept
+
+    @staticmethod
+    def merge_fact_metadata(
+        kept_fact: Dict[str, Any],
+        discarded_facts: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """
+        語意去重判定「單純重複」、多條事實合併為一條時的算術規則。
+
+        這些數值不可信任模型計算，必須是程式碼固定規則：`hits` 取合併前各條的
+        最大值（延續原本最受肯定的熱度，不重複計算造成灌水）、`created_at` 取最早值
+        （這件事實際上存在得多久）、`last_used_at` 取最新值。文字與 embedding 沿用
+        `kept_fact`（去重呼叫方已依「資訊最完整」原則選出）。
+        """
+        all_facts = [kept_fact] + list(discarded_facts)
+        now = int(time.time())
+        return {
+            "text": kept_fact["text"],
+            "hits": max(f.get("hits", 1) for f in all_facts),
+            "created_at": min((f.get("created_at", now) for f in all_facts), default=now),
+            "last_used_at": max((f.get("last_used_at", 0) for f in all_facts), default=now),
+            "embedding": kept_fact.get("embedding"),
+            "embedding_model": kept_fact.get("embedding_model", "")
+        }
+
+    @staticmethod
+    def resolve_fact_conflict(facts: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        當語意去重判定一組事實「同主題但語意矛盾」（而非單純重複）時，
+        **不採用模型的保留/捨棄結果**，改用決定性規則保留「最後被使用／建立的一條」，
+        與 `merge_facts()` 既有的否定推翻邏輯（以新事實推翻舊事實）精神一致——
+        矛盾情境下不能讓模型自己決定該信哪一句，那正是本系統一路在移除的猜測。
+        """
+        return max(facts, key=lambda f: (f.get("last_used_at", 0), f.get("created_at", 0)))
+
+    @staticmethod
+    def cosine_similarity(vec_a: Optional[List[float]], vec_b: Optional[List[float]]) -> float:
+        """計算兩向量的餘弦相似度，任一向量缺失、長度不符或為零向量一律回傳 0（視為不相似）"""
+        if not vec_a or not vec_b or len(vec_a) != len(vec_b):
+            return 0.0
+
+        dot = sum(a * b for a, b in zip(vec_a, vec_b))
+        norm_a = math.sqrt(sum(a * a for a in vec_a))
+        norm_b = math.sqrt(sum(b * b for b in vec_b))
+        if norm_a == 0.0 or norm_b == 0.0:
+            return 0.0
+
+        return dot / (norm_a * norm_b)
+
+    @staticmethod
+    def group_facts(
+        facts: List[Dict[str, Any]],
+        threshold: float = FACTS_DEDUP_SIMILARITY_THRESHOLD
+    ) -> List[List[Dict[str, Any]]]:
+        """
+        機制 B 的決定性分群：對全部帶 embedding 的 facts 做 pairwise cosine similarity，
+        相似度 >= threshold 的兩兩相連，取連通分量成群（union-find）。
+
+        範圍涵蓋全部 facts，刻意不限定冷門尾巴——同一件事因措辭不同各自累積 hits、
+        兩邊都沒被判定為重複的情況，同樣可能發生在熱門事實身上。只回傳 size >= 2
+        的群組；沒有相似對象的事實不需要去重，不會出現在回傳結果中。
+        """
+        candidates = [f for f in facts if f.get("embedding")]
+        n = len(candidates)
+        if n < 2:
+            return []
+
+        parent = list(range(n))
+
+        def find(x: int) -> int:
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def union(x: int, y: int) -> None:
+            rx, ry = find(x), find(y)
+            if rx != ry:
+                parent[ry] = rx
+
+        for i in range(n):
+            for j in range(i + 1, n):
+                sim = MemoryManager.cosine_similarity(candidates[i]["embedding"], candidates[j]["embedding"])
+                if sim >= threshold:
+                    union(i, j)
+
+        groups: Dict[int, List[Dict[str, Any]]] = {}
+        for i in range(n):
+            groups.setdefault(find(i), []).append(candidates[i])
+
+        return [g for g in groups.values() if len(g) >= 2]
+
+    @staticmethod
+    def get_facts_missing_embedding(
+        facts: List[Dict[str, Any]],
+        current_model: str
+    ) -> List[Dict[str, Any]]:
+        """
+        篩出尚無 embedding、或 embedding 是用舊模型算的 facts，供語意去重批次補算。
+        換 embedding 模型後，舊向量與新向量空間不相容，需整批判定過期並重算。
+        """
+        return [f for f in facts if not f.get("embedding") or f.get("embedding_model") != current_model]
+
+    @staticmethod
     def merge_facts(
         current_facts_raw: Any,
         incoming_facts_raw: Any,
         remove_facts_raw: Any,
-        reaffirm_bonus: int = FACTS_EXTRACTION_REAFFIRM_BONUS
+        reaffirm_bonus: int = FACTS_EXTRACTION_REAFFIRM_BONUS,
+        max_total: int = FACTS_MAX_STORED_PER_USER
     ) -> List[Dict[str, Any]]:
         """
         合併與更新事實清單（含更正刪除、否定推翻與提煉重複確認加權）：
@@ -310,6 +453,8 @@ class MemoryManager:
            - 極性相同 → 視為重複確認，hits += reaffirm_bonus。
            - 極性相反 → 視為矛盾，以新事實**取代**舊事實（熱度歸 1，不加權）。
         3. 若為全新事實，追加至末尾。
+        4. 最後套用 `evict_stale_facts()`，確保回傳結果數量永遠不超過 max_total——
+           這是保證 facts 有界的唯一入口（見該函式說明）。
         """
         cur_facts = MemoryManager.normalize_facts(current_facts_raw)
         now = int(time.time())
@@ -386,10 +531,12 @@ class MemoryManager:
                     "text": new_f,
                     "hits": 1,
                     "created_at": now,
-                    "last_used_at": now
+                    "last_used_at": now,
+                    "embedding": None,
+                    "embedding_model": ""
                 })
 
-        return merged_facts
+        return MemoryManager.evict_stale_facts(merged_facts, max_total=max_total)
 
     @staticmethod
     def extract_keywords(text: str) -> Set[str]:
@@ -671,6 +818,23 @@ class MemoryManager:
                     data["aliases"] = MemoryManager.normalize_aliases(data.get("aliases"))
                     res[str(data["user_id"])] = data
                 return res
+
+    @staticmethod
+    async def get_user_ids_with_min_facts(min_count: int) -> List[str]:
+        """
+        取得事實數達到門檻的使用者 ID 清單，供語意去重批次篩選掃描範圍，
+        避免對事實數過少（不可能形成任何分群）的使用者也全量處理。
+        """
+        async with get_db_connection() as db:
+            async with db.execute("SELECT user_id, facts FROM user_profiles") as cursor:
+                rows = await cursor.fetchall()
+
+        result = []
+        for row in rows:
+            facts = MemoryManager.normalize_facts(row["facts"])
+            if len(facts) >= min_count:
+                result.append(str(row["user_id"]))
+        return result
 
     # 已回報過的同名暱稱，避免每則訊息都重複警告（僅在碰撞名單變動時才輸出）
     _reported_ambiguous_names: Set[str] = set()

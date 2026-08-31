@@ -130,6 +130,15 @@ HISTORY_RECALL_MIN_SCORE: int = int(_mem_cfg.get("history_recall_min_score", 2))
 HISTORY_RECALL_MAX_QUERY_TOKENS: int = int(_mem_cfg.get("history_recall_max_query_tokens", 30))
 DB_PATH: str = str(BASE_DIR / _mem_cfg.get("db_path", "data/friend_bot.db"))
 
+# 7.02 事實容量控制與語意去重 (Facts Capacity & Dedup) 設定
+_facts_maint_cfg = _mem_cfg.get("facts_maintenance", {})
+FACTS_MAX_STORED_PER_USER: int = int(_facts_maint_cfg.get("max_stored_per_user", 60))
+ENABLE_FACTS_DEDUP: bool = bool(_facts_maint_cfg.get("enable_dedup", True))
+FACTS_DEDUP_SIMILARITY_THRESHOLD: float = float(_facts_maint_cfg.get("dedup_similarity_threshold", 0.86))
+FACTS_DEDUP_CLUSTER_MAX_SIZE: int = int(_facts_maint_cfg.get("dedup_cluster_max_size", 6))
+FACTS_EMBEDDING_MODEL: str = str(_facts_maint_cfg.get("embedding_model", "gemini-embedding-001"))
+FACTS_DEDUP_SWEEP_INTERVAL_SECONDS: float = float(_facts_maint_cfg.get("dedup_sweep_interval_seconds", 1800))
+
 # 7.05 別名 (Alias) 設定
 _alias_cfg = _mem_cfg.get("alias", {})
 ENABLE_ALIAS_LEARNING: bool = bool(_alias_cfg.get("enable_alias_learning", True))

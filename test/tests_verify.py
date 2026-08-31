@@ -18,6 +18,8 @@ from src.friend_bot.bot.utils.calendar import CalendarManager, parse_calendar_ti
 from src.friend_bot.bot.utils.burst import BurstBufferManager
 from src.friend_bot.core.emotion import EmotionReplacer
 from src.friend_bot.ai.memory_extractor import MemoryExtractor
+from src.friend_bot.ai.facts_dedup import FactsDeduplicator
+from src.friend_bot.ai.facts_embedding import FactsEmbeddingClient
 from src.friend_bot.ai.prompts import (
     format_memory_context,
     build_burst_dialogue_prompt,
@@ -25,7 +27,8 @@ from src.friend_bot.ai.prompts import (
     build_multi_entity_extraction_prompt,
     build_batch_dialogue_extraction_prompt,
     format_voice_channel_context,
-    build_system_instruction
+    build_system_instruction,
+    build_facts_dedup_prompt
 )
 from src.friend_bot.core.config import MUSIC_PLAY_COMMAND
 from src.friend_bot.bot.client import FriendBotClient
@@ -1645,6 +1648,175 @@ class TestFriendBotFeatures(unittest.IsolatedAsyncioTestCase):
         self.assertIn(f"{MUSIC_PLAY_COMMAND} 歌名", si)
         # 明確告知模型自己無法播放，避免它承諾做不到的事
         self.assertIn("你自己無法播放音樂", si)
+
+    # ==================== 28. 事實容量控制與語意去重 (機制 A + B) ====================
+
+    def test_evict_stale_facts_keeps_hot_and_recent(self):
+        """機制 A：超過上限時，優先淘汰低熱度／久未使用的事實"""
+        facts = [
+            {"text": "熱門事實", "hits": 10, "created_at": 100, "last_used_at": 900},
+            {"text": "冷門舊事實", "hits": 1, "created_at": 100, "last_used_at": 100},
+            {"text": "中等事實", "hits": 3, "created_at": 100, "last_used_at": 500},
+        ]
+        kept = MemoryManager.evict_stale_facts(facts, max_total=2)
+        kept_texts = {f["text"] for f in kept}
+        self.assertEqual(kept_texts, {"熱門事實", "中等事實"})
+        self.assertNotIn("冷門舊事實", kept_texts)
+
+    def test_merge_facts_respects_hard_cap(self):
+        """merge_facts() 尾端必須套用硬上限，回傳結果永遠不超過 max_total"""
+        current_facts = [
+            {"text": f"事實{i}", "hits": i, "created_at": i, "last_used_at": i} for i in range(1, 6)
+        ]
+        merged = MemoryManager.merge_facts(current_facts, [], [], max_total=3)
+        self.assertEqual(len(merged), 3)
+        self.assertEqual({f["text"] for f in merged}, {"事實5", "事實4", "事實3"})
+
+    def test_merge_fact_metadata_arithmetic(self):
+        """合併重複事實時，hits 取最大值、created_at 取最早值、last_used_at 取最新值"""
+        kept = {"text": "很愛吃辣的東西", "hits": 3, "created_at": 200, "last_used_at": 500,
+                "embedding": [1.0, 0.0], "embedding_model": "m1"}
+        discarded = [{"text": "喜歡吃辣", "hits": 7, "created_at": 100, "last_used_at": 300}]
+
+        merged = MemoryManager.merge_fact_metadata(kept, discarded)
+        self.assertEqual(merged["text"], "很愛吃辣的東西")
+        self.assertEqual(merged["hits"], 7)
+        self.assertEqual(merged["created_at"], 100)
+        self.assertEqual(merged["last_used_at"], 500)
+
+    def test_resolve_fact_conflict_keeps_most_recently_used(self):
+        """矛盾解決不採用模型的保留/捨棄結果，改用「保留最後使用者」的決定性規則"""
+        facts = [
+            {"text": "喜歡吃辣", "hits": 5, "created_at": 100, "last_used_at": 100},
+            {"text": "已經不喜歡吃辣了", "hits": 1, "created_at": 200, "last_used_at": 900},
+        ]
+        kept = MemoryManager.resolve_fact_conflict(facts)
+        self.assertEqual(kept["text"], "已經不喜歡吃辣了")
+
+    def test_group_facts_clusters_by_similarity_and_ignores_missing_embedding(self):
+        """分群範圍涵蓋全部事實（不分熱門冷門），無 embedding 的事實不參與分群"""
+        facts = [
+            {"text": "喜歡吃辣", "hits": 1, "created_at": 100, "last_used_at": 100,
+             "embedding": [1.0, 0.0, 0.0], "embedding_model": "m1"},
+            {"text": "很愛吃辣的東西", "hits": 1, "created_at": 200, "last_used_at": 200,
+             "embedding": [1.0, 0.0, 0.0], "embedding_model": "m1"},
+            {"text": "最近在學吉他", "hits": 1, "created_at": 300, "last_used_at": 300,
+             "embedding": [0.0, 1.0, 0.0], "embedding_model": "m1"},
+            {"text": "住在台北", "hits": 1, "created_at": 400, "last_used_at": 400,
+             "embedding": None, "embedding_model": ""},
+        ]
+        groups = MemoryManager.group_facts(facts, threshold=0.86)
+        self.assertEqual(len(groups), 1)
+        self.assertEqual({f["text"] for f in groups[0]}, {"喜歡吃辣", "很愛吃辣的東西"})
+
+    def test_get_facts_missing_embedding_detects_stale_model(self):
+        """換 embedding 模型後，舊向量需被判定過期並重算"""
+        facts = [
+            {"text": "A", "embedding": [1.0, 0.0], "embedding_model": "old-model"},
+            {"text": "B", "embedding": [0.0, 1.0], "embedding_model": "new-model"},
+            {"text": "C", "embedding": None, "embedding_model": ""},
+        ]
+        missing = MemoryManager.get_facts_missing_embedding(facts, "new-model")
+        self.assertEqual({f["text"] for f in missing}, {"A", "C"})
+
+    def test_facts_dedup_prompt_forbids_generalization(self):
+        """去重 prompt 必須要求逐字照抄原句、禁止歸納成上位詞，且不確定時要求保守"""
+        prompt = build_facts_dedup_prompt(["喜歡吃辣", "很愛吃辣的東西"])
+        self.assertIn("逐字照抄", prompt)
+        self.assertIn("不確定時一律選", prompt)
+        self.assertIn("喜歡香蕉", prompt)
+
+    def _make_deduplicator(self, relation: str, keep: str = "", embed_return=None):
+        """測試輔助：建立 FactsDeduplicator，以固定結果取代 Gemini 與 Embedding 呼叫"""
+        fake_gemini = MagicMock()
+        fake_gemini.facts_similar_check = AsyncMock(return_value={"relation": relation, "keep": keep})
+        fake_embedder = MagicMock()
+        fake_embedder.model = "test-model"
+        fake_embedder.embed_texts = AsyncMock(return_value=embed_return or [])
+        return FactsDeduplicator(gemini_client=fake_gemini, embedding_client=fake_embedder)
+
+    async def test_facts_deduplicator_merges_duplicate_cluster(self):
+        """機制 B：判定為 duplicate 時，合併為一條並套用 merge_fact_metadata 算術規則"""
+        user_id = "dedup_user_1"
+        await MemoryManager.update_user_profile(
+            user_id=user_id, user_name="去重測試員",
+            facts=[
+                {"text": "喜歡吃辣", "hits": 2, "created_at": 100, "last_used_at": 100,
+                 "embedding": [1.0, 0.0], "embedding_model": "test-model"},
+                {"text": "很愛吃辣的東西", "hits": 5, "created_at": 200, "last_used_at": 300,
+                 "embedding": [1.0, 0.0], "embedding_model": "test-model"},
+            ]
+        )
+
+        dedup = self._make_deduplicator(relation="duplicate", keep="很愛吃辣的東西")
+        await dedup.dedupe_user(user_id)
+
+        profile = await MemoryManager.get_user_profile(user_id)
+        self.assertEqual(len(profile["facts"]), 1)
+        merged = profile["facts"][0]
+        self.assertEqual(merged["text"], "很愛吃辣的東西")
+        self.assertEqual(merged["hits"], 5)
+        self.assertEqual(merged["created_at"], 100)
+        self.assertEqual(merged["last_used_at"], 300)
+
+    async def test_facts_deduplicator_resolves_conflict_cluster(self):
+        """機制 B：判定為 conflict 時，不採用模型的 keep，改保留最後使用者"""
+        user_id = "dedup_user_2"
+        await MemoryManager.update_user_profile(
+            user_id=user_id, user_name="矛盾測試員",
+            facts=[
+                {"text": "喜歡吃辣", "hits": 5, "created_at": 100, "last_used_at": 100,
+                 "embedding": [1.0, 0.0], "embedding_model": "test-model"},
+                {"text": "已經不喜歡吃辣了", "hits": 1, "created_at": 200, "last_used_at": 900,
+                 "embedding": [1.0, 0.0], "embedding_model": "test-model"},
+            ]
+        )
+
+        # 模型的 keep 故意給空字串，驗證系統不會採用模型的選擇
+        dedup = self._make_deduplicator(relation="conflict", keep="")
+        await dedup.dedupe_user(user_id)
+
+        profile = await MemoryManager.get_user_profile(user_id)
+        self.assertEqual(len(profile["facts"]), 1)
+        self.assertEqual(profile["facts"][0]["text"], "已經不喜歡吃辣了")
+
+    async def test_facts_deduplicator_none_relation_keeps_all(self):
+        """機制 B：判定為 none 時，群組內事實原樣保留，不誤刪"""
+        user_id = "dedup_user_3"
+        await MemoryManager.update_user_profile(
+            user_id=user_id, user_name="不相關測試員",
+            facts=[
+                {"text": "喜歡吃辣", "hits": 1, "created_at": 100, "last_used_at": 100,
+                 "embedding": [1.0, 0.0], "embedding_model": "test-model"},
+                {"text": "喜歡吃甜", "hits": 1, "created_at": 200, "last_used_at": 200,
+                 "embedding": [1.0, 0.0], "embedding_model": "test-model"},
+            ]
+        )
+
+        dedup = self._make_deduplicator(relation="none")
+        await dedup.dedupe_user(user_id)
+
+        profile = await MemoryManager.get_user_profile(user_id)
+        self.assertEqual(len(profile["facts"]), 2)
+
+    async def test_facts_deduplicator_backfills_missing_embeddings(self):
+        """embedding 平時只 lazy backfill：缺 embedding 的事實在去重批次時補算並寫回快取"""
+        user_id = "dedup_user_4"
+        await MemoryManager.update_user_profile(
+            user_id=user_id, user_name="補算測試員",
+            facts=[
+                {"text": "喜歡吃辣", "hits": 1, "created_at": 100, "last_used_at": 100},
+                {"text": "喜歡吃甜", "hits": 1, "created_at": 200, "last_used_at": 200},
+            ]
+        )
+
+        dedup = self._make_deduplicator(relation="none", embed_return=[[1.0, 0.0], [0.0, 1.0]])
+        await dedup.dedupe_user(user_id)
+
+        profile = await MemoryManager.get_user_profile(user_id)
+        for f in profile["facts"]:
+            self.assertIsNotNone(f["embedding"])
+            self.assertEqual(f["embedding_model"], "test-model")
 
 
 if __name__ == "__main__":

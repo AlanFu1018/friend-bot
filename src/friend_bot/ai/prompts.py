@@ -456,3 +456,35 @@ def build_batch_dialogue_extraction_prompt(
 ```
 
 {_EXTRACTION_OUTPUT_CLOSING_INSTRUCTION}"""
+
+def build_facts_dedup_prompt(cluster: List[str]) -> str:
+    """
+    建立用於【事實語意去重判斷】的 Prompt（機制 B，見 MemoryManager.group_facts）。
+
+    輸入是一組因 embedding 相似度而被歸為候選群組的事實原句（同一位使用者），
+    模型只負責判斷關係，不得自行生成新的摘要句子——重複時只能在候選原句中
+    做集合選擇，避免「喜歡香蕉、喜歡蘋果 → 喜歡水果」這類會丟失具體資訊的歸納。
+    """
+    facts_list = "\n".join(f"{i + 1}. {text}" for i, text in enumerate(cluster))
+
+    return f"""你是一個嚴謹的語意比對器，任務是判斷以下幾條「關於同一位使用者」的事實敘述彼此之間的關係。
+
+【待比對的事實】：
+{facts_list}
+
+【判斷規則】：
+1. "duplicate"：這些句子在講**同一件事**，只是措辭或詳細程度不同（例如「喜歡吃辣」與「很愛吃辣的東西」）。
+   - 請從上方列表中選出**資訊最完整、最具體**的一句作為 "keep"，**必須是列表中的原句，逐字照抄，不可自行改寫、精簡或生成新句子**。
+   - ⚠️ 不可以把不同的具體事實歸納成上位詞句子（例如「喜歡香蕉」與「喜歡蘋果」不是 duplicate，不可合併成「喜歡水果」——這會丟失具體資訊）。
+2. "conflict"：這些句子在講同一個主題，但**立場或事實相反**（例如「喜歡吃辣」與「已經不喜歡吃辣了」）。此類不需要你選 "keep"，系統會依時間新舊自動判斷，"keep" 請給空字串。
+3. "none"：這些句子其實在講不同的事，或者你無法確定它們是否為同一件事——請勿勉強合併，一律回傳 "none"。
+   - **不確定時一律選 "none"**，寧可讓它們都保留，也不可誤判導致事實遺失。
+
+【輸出 JSON 格式】（只輸出 JSON，不要有其他文字）：
+```json
+{{
+  "relation": "duplicate",
+  "keep": "很愛吃辣的東西"
+}}
+```
+若判斷為 conflict 或 none，"keep" 請給空字串 ""。"""

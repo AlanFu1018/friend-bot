@@ -1,4 +1,6 @@
-from typing import List, Optional
+import json
+import re
+from typing import List, Optional, Dict, Any
 from google import genai
 from google.genai import types
 
@@ -13,7 +15,7 @@ from src.friend_bot.core.config import (
     SEARCH_TOP_K,
 )
 from src.friend_bot.core.logger import get_logger
-from .prompts import build_system_instruction
+from .prompts import build_system_instruction, build_facts_dedup_prompt
 from src.friend_bot.ai.tools.web_search_tool import perform_web_search
 from src.friend_bot.core.emotion import EmotionReplacer
 
@@ -159,3 +161,41 @@ class GeminiClient:
 
             logger.error(f"Gemini 生成回應失敗: {e}", exc_info=True)
             return "（剛才走神了，能再跟我說一次嗎？）"
+
+    async def facts_similar_check(self, cluster: List[str]) -> Dict[str, Any]:
+        """
+        判斷一群因 embedding 相似度而被歸為候選群組的事實原句彼此關係：
+        "duplicate"（同一件事不同講法）／"conflict"（同主題但語意矛盾）／"none"（不相關）。
+
+        呼叫失敗或輸出格式錯誤一律視為 "none"（整群保留不動）——沿用
+        `MemoryManager.should_remove_fact()` 一貫的保守原則：寧可漏判也不誤刪。
+        """
+        fallback = {"relation": "none", "keep": ""}
+        if not self.api_key or len(cluster) < 2:
+            return fallback
+
+        prompt = build_facts_dedup_prompt(cluster)
+
+        try:
+            raw_result = await self.generate_response(
+                prompt=prompt,
+                system_instruction="你是一個嚴謹的語意比對器，只依照指示輸出乾淨的 JSON，不得輸出任何無關文字。",
+                temperature=0.1,
+                max_tokens=256,
+                enable_tools=False
+            )
+            cleaned = (raw_result or "").strip()
+            if "```" in cleaned:
+                match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', cleaned)
+                if match:
+                    cleaned = match.group(1).strip()
+
+            data = json.loads(cleaned)
+            relation = str(data.get("relation", "none")).strip().lower()
+            if relation not in ("duplicate", "conflict", "none"):
+                relation = "none"
+            keep = str(data.get("keep", "")).strip()
+            return {"relation": relation, "keep": keep}
+        except Exception as e:
+            logger.warning(f"事實相似性判斷失敗，整群保留不動: {e}")
+            return fallback

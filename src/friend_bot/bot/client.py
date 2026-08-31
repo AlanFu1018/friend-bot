@@ -29,6 +29,7 @@ from src.friend_bot.core.config import (
 from src.friend_bot.core.logger import get_logger
 from src.friend_bot.ai.gemini_client import GeminiClient
 from src.friend_bot.ai.memory_extractor import MemoryExtractor
+from src.friend_bot.ai.facts_dedup import FactsDeduplicator
 from src.friend_bot.ai.prompts import (
     format_memory_context,
     build_burst_dialogue_prompt,
@@ -73,6 +74,7 @@ class FriendBotClient(
         self.tree = app_commands.CommandTree(self)
         self.gemini = GeminiClient()
         self.memory_extractor = MemoryExtractor()
+        self.facts_deduplicator = FactsDeduplicator()
         self.alarm_scheduler = AlarmScheduler(self)
         self.calendar_scheduler = CalendarScheduler(self)
         self.burst_manager = BurstBufferManager(
@@ -103,6 +105,8 @@ class FriendBotClient(
         self.calendar_scheduler.start()
         # 背景撿漏：處理提煉失敗或重啟遺失佇列而殘留的未提煉訊息（取代原本的每則訊息 JIT）
         self.memory_extractor.start_sweeper()
+        # 背景語意去重：定期合併「同一件事、不同講法」的重複事實，降低硬上限淘汰真實事實的頻率
+        self.facts_deduplicator.start_sweeper()
 
     async def on_ready(self):
         logger.info(f"機器人已成功登入為: {self.user} (ID: {self.user.id})")
