@@ -114,6 +114,14 @@ class MemoryManager:
         else:
             return "cherished"
 
+    # 4 階關係階級與 Tier N 標號的對照（1-indexed，對齊 prompts.py 的 TIER_ATTITUDE_MAP 用語）
+    _TIER_RANK = {"stranger": 1, "familiar": 2, "trusted": 3, "cherished": 4}
+
+    @staticmethod
+    def tier_rank(tier: str) -> int:
+        """將關係階級名稱轉為 Tier 數字（1~4），無法辨識時視為最低的 Tier 1"""
+        return MemoryManager._TIER_RANK.get(tier, 1)
+
     @staticmethod
     def calculate_favorability_update(
         current_score: int,

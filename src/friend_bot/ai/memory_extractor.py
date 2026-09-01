@@ -17,7 +17,9 @@ from src.friend_bot.core.config import (
     LISTEN_DEBOUNCE_SECONDS,
     LISTEN_MAX_QUEUE_MESSAGES,
     EXTRACTION_SWEEP_INTERVAL_SECONDS,
-    ENABLE_ALIAS_LEARNING
+    ENABLE_ALIAS_LEARNING,
+    ENABLE_AI_INVENTED_ALIAS,
+    INVENTED_ALIAS_MIN_TIER
 )
 
 logger = get_logger("extractor")
@@ -317,6 +319,10 @@ class MemoryExtractor:
             except (ValueError, TypeError):
                 delta_int = 0
 
+            # 用來把 _mutator 內算出的 new_tier 帶到 apply_profile_update() 呼叫之外，
+            # 供下面的 AI 主動命名門檻判斷使用（該判斷需要「這次更新後」的最新階級）。
+            tier_holder: Dict[str, str] = {}
+
             def _mutator(current_p: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
                 cur_facts = current_p.get("facts", []) if current_p else []
                 cur_notes = current_p.get("interaction_notes", "") if current_p else ""
@@ -354,6 +360,8 @@ class MemoryExtractor:
                 else:
                     new_fav, new_tier = cur_fav, cur_tier
                     new_daily_gain, today_str = cur_daily_gain, cur_gain_date
+
+                tier_holder["tier"] = new_tier
 
                 # user_name 僅來自 Discord 權威名稱；退而求其次沿用既有畫像的名字
                 final_user_name = names.get(target_uid) or cur_name or model_name or "用戶"
@@ -398,6 +406,16 @@ class MemoryExtractor:
                     target_uid, update_item.get("aliases", []), provenance or {}
                 )
 
+            # 【AI 主動命名】觸發時機與別名學習完全相同（同一次背景提煉、當事人在場時），
+            # 唯一額外門檻是信任階級——只有 tier_holder 記下的「這次更新後」階級達標才生效。
+            if ENABLE_AI_INVENTED_ALIAS:
+                await self._apply_invented_alias(
+                    target_uid,
+                    update_item.get("invented_alias"),
+                    tier_holder.get("tier", "stranger"),
+                    provenance or {}
+                )
+
     async def _apply_alias_proposals(
         self,
         target_uid: str,
@@ -428,6 +446,39 @@ class MemoryExtractor:
             )
             if not ok:
                 logger.debug(f"🏷️ [別名提議未採納] ID:{target_uid} 「{alias}」：{reason}")
+
+    async def _apply_invented_alias(
+        self,
+        target_uid: str,
+        invented_alias: Any,
+        current_tier: str,
+        provenance: Dict[str, Any]
+    ) -> None:
+        """
+        套用模型主動發想的暱稱。與 `_apply_alias_proposals()`（聽到既有稱呼）共用同一個
+        `MemoryManager.add_alias()` 寫入與校驗管線，差別只在 source 標記與這裡多一道
+        信任階級門檻；沒有額外的冷卻或「只提議一次」限制——重複提議一樣受
+        `add_alias()` 既有的碰撞排除與數量上限保護，讓她可以在關係更進一步時再取新的。
+        """
+        if MemoryManager.tier_rank(current_tier) < INVENTED_ALIAS_MIN_TIER:
+            return
+
+        alias = str(invented_alias or "").strip()
+        if not alias:
+            return
+
+        ok, reason = await MemoryManager.add_alias(
+            user_id=target_uid,
+            alias=alias,
+            source="ai_invented",
+            by=[],  # 沒有真人「提出者」——是她自己想的，不能歸給剛好在場發言的人
+            channel_id=str(provenance.get("channel_id", "")),
+            message_id=str(provenance.get("message_id", ""))
+        )
+        if ok:
+            logger.info(f"🏷️ [AI 主動命名] 用戶 ID:{target_uid} 獲得新暱稱「{alias}」")
+        else:
+            logger.debug(f"🏷️ [AI 暱稱未採納] ID:{target_uid} 「{alias}」：{reason}")
 
     # ==================== 對外相容介面 ====================
 

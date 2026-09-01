@@ -150,6 +150,8 @@ INTERACTION_NOTES_SHRINK_RATIO: float = float(_notes_protect_cfg.get("shrink_rat
 _alias_cfg = _mem_cfg.get("alias", {})
 ENABLE_ALIAS_LEARNING: bool = bool(_alias_cfg.get("enable_alias_learning", True))
 MAX_ALIASES_PER_USER: int = int(_alias_cfg.get("max_aliases_per_user", 5))
+ENABLE_AI_INVENTED_ALIAS: bool = bool(_alias_cfg.get("enable_ai_invented_alias", False))
+INVENTED_ALIAS_MIN_TIER: int = int(_alias_cfg.get("invented_alias_min_tier", 3))
 
 # 7.1 三軌事實記憶檢索 (3-Track Fact RAG & Heat) 設定
 _facts_rag_cfg = _mem_cfg.get("facts_rag", {})

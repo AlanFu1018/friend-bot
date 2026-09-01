@@ -264,7 +264,13 @@ _EXTRACTION_ALIAS_RULE = """5. 【別名提議 (aliases)】：
      也不要把話題內容、物品名稱或稱謂（例如「學長」「老師」）當成綽號。
    - 這是為了讓機器人日後聽到綽號時能認出是誰，不是用來記錄事實。"""
 
-_EXTRACTION_OUTPUT_FORMAT_RULE = """6. 【輸出規範】：
+_EXTRACTION_INVENTED_ALIAS_RULE = """6. 【暱稱發想 (invented_alias)】：
+   - 若你判斷自己與這位在場群友已經非常親密、深受信賴，可以主動幫他發想一個
+     符合你角色個性、親切不冒犯的暱稱，即使他已經有別名也可以再提議一個新的。
+   - 絕對不能涉及外貌、身材、家庭背景、殘疾、種族等敏感面向。
+   - 沒有想法、或還不到那麼親密的程度，一律回傳 null（不要勉強想一個）。"""
+
+_EXTRACTION_OUTPUT_FORMAT_RULE = """7. 【輸出規範】：
    - 輸出嚴格的 JSON 物件，包含 "updates" 陣列。"""
 
 _EXTRACTION_OUTPUT_CLOSING_INSTRUCTION = "請直接輸出 JSON，不要附帶任何多餘文字。"
@@ -338,6 +344,7 @@ def build_multi_entity_extraction_prompt(
      * 【社交關係】：記錄對特定群友（如桶子、真由理等）的互動默契與態度，以及與紅莉栖的互動張力（傲嬌、調侃、尊重等）。
      * 【近期動態】：根據最新對話滾動更新當前的生活狀態、話題焦點、抱怨、作息或情緒動向。
 {_EXTRACTION_ALIAS_RULE}
+{_EXTRACTION_INVENTED_ALIAS_RULE}
 {_EXTRACTION_OUTPUT_FORMAT_RULE}
 
 【輸出 JSON 範例】：
@@ -350,6 +357,7 @@ def build_multi_entity_extraction_prompt(
       "facts": ["目前定居在台北市"],
       "remove_facts": ["住在台中市，離公司很近"],
       "aliases": [],
+      "invented_alias": null,
       "interaction_notes": "【核心性格】極度理性中帶著傲嬌，對未知科學充滿狂熱，是團隊的核心推手。\\n【社交關係】對桶子愛吐槽但非常信任，面對紅莉栖時嘴硬卻常被科學論點破防。\\n【近期動態】最近因為連夜做實驗而顯得疲憊，多次向群友抱怨程式 bug，互動時情緒較平時更直接。",
       "favorability_delta": 1
     }},
@@ -359,6 +367,7 @@ def build_multi_entity_extraction_prompt(
       "facts": ["最近常熬夜通宵"],
       "remove_facts": [],
       "aliases": ["桶子"],
+      "invented_alias": null,
       "interaction_notes": "【核心性格】幽默隨和、專精技術的超級駭客，對二次元文化充滿熱忱。\\n【社交關係】常被岡部與真由理吐槽生活作息，但關鍵時刻極度可靠。\\n【近期動態】近期沉迷新出的 Galgame 與鍵盤硬體，連日熬夜打電動。",
       "favorability_delta": 0
     }}
@@ -427,6 +436,7 @@ def build_batch_dialogue_extraction_prompt(
      * 【社交關係】：記錄對其他群友的互動態度，以及與紅莉栖的互動默契。
      * 【近期動態】：根據此批對話總結最近的生活焦點、情緒或話題動態。
 {_EXTRACTION_ALIAS_RULE}
+{_EXTRACTION_INVENTED_ALIAS_RULE}
 {_EXTRACTION_OUTPUT_FORMAT_RULE}
 
 【輸出 JSON 範例】：
@@ -439,6 +449,7 @@ def build_batch_dialogue_extraction_prompt(
       "facts": ["最近在研究時間機器新理論"],
       "remove_facts": [],
       "aliases": [],
+      "invented_alias": null,
       "interaction_notes": "【核心性格】中二狂氣科學家風格，熱衷於發表作戰計畫。\\n【社交關係】常與桶子交流實驗室進展，對紅莉栖愛反駁卻深受信賴。\\n【近期動態】在群裡興奮地分享新的時間理論研究成果。",
       "favorability_delta": 1
     }},
@@ -448,6 +459,7 @@ def build_batch_dialogue_extraction_prompt(
       "facts": ["買了新靜音機械鍵盤"],
       "remove_facts": [],
       "aliases": ["桶子"],
+      "invented_alias": null,
       "interaction_notes": "【核心性格】技術精湛且熱愛二次元文化的頂級駭客。\\n【社交關係】常與岡部互相吐槽，是實驗室的技術頂樑柱。\\n【近期動態】熱情地向大家推薦電腦週邊與靜音鍵盤。",
       "favorability_delta": 0
     }}

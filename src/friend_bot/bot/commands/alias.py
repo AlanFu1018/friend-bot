@@ -11,6 +11,7 @@ logger = logging.getLogger("friend_bot.commands.alias")
 
 SOURCE_LABEL = {
     "extraction": "🤖 自動學習",
+    "ai_invented": "💡 AI 主動命名",
     "command": "✍️ 手動設定",
     "unknown": "❔ 來源不明"
 }

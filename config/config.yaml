@@ -109,7 +109,16 @@ memory:
 
     # 每人別名數量上限。達上限時拒絕新增並記錄 log，不會自動淘汰既有別名。
     # 別名越多，「誰命中誰」的碰撞風險越高，不建議設得太大。
-    max_aliases_per_user: 5
+    max_aliases_per_user: 10
+
+    # 是否允許背景提煉主動幫群友發想暱稱（而非只是聽到既有稱呼才記錄）。
+    # 觸發時機與別名學習完全相同（同一次背景提煉、當事人在場時），沒有額外的
+    # 冷卻或「只提議一次」限制，一樣受 max_aliases_per_user 與碰撞排除保護。
+    enable_ai_invented_alias: true
+
+    # 只有關係階級達到此 Tier 數（1~4，對應 stranger/familiar/trusted/cherished）
+    # 以上才會被主動取暱稱。預設 3 = trusted（實驗室夥伴）。
+    invented_alias_min_tier: 3
 
   # 【三軌事實記憶檢索 (3-Track Fact RAG & Heat) 設定】
   facts_rag:
