@@ -166,6 +166,11 @@ memory:
     # 單一群組送進 Gemini 判斷的事實數量上限，避免單次呼叫過大或判斷品質下降。
     dedup_cluster_max_size: 6
 
+    # 每位使用者每天最多讓幾條事實進入去重流程（含 embedding 補算與分群比對）。
+    # 這是 process 內的記憶體計數（重啟會歸零），目的是壓低 API 用量的軟上限，
+    # 不影響機制 A 的事實數量上界保證，只是讓機制 B 的處理速度變慢。
+    dedup_max_facts_per_user_per_day: 10
+
     # 用於計算事實 embedding 的模型代號。換模型後舊向量會自動判定過期並重算。
     embedding_model: "gemini-embedding-001"
 

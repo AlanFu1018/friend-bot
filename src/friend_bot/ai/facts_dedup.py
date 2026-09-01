@@ -1,5 +1,6 @@
 import asyncio
-from typing import Any, Dict, List, Optional
+from datetime import date
+from typing import Any, Dict, List, Optional, Tuple
 
 from src.friend_bot.memory.memory_manager import MemoryManager
 from src.friend_bot.core.logger import get_logger
@@ -9,6 +10,7 @@ from src.friend_bot.core.config import (
     ENABLE_FACTS_DEDUP,
     FACTS_DEDUP_SIMILARITY_THRESHOLD,
     FACTS_DEDUP_CLUSTER_MAX_SIZE,
+    FACTS_DEDUP_MAX_FACTS_PER_USER_PER_DAY,
     FACTS_DEDUP_SWEEP_INTERVAL_SECONDS,
 )
 
@@ -39,11 +41,33 @@ class FactsDeduplicator:
         self.embedder = embedding_client or FactsEmbeddingClient()
         self._sweep_task: Optional[asyncio.Task] = None
         self._sweeping = False
+        # 每人每日去重配額（process 內記憶體計數，重啟歸零）：{user_id: (日期, 今日已處理筆數)}
+        self._daily_dedup_usage: Dict[str, Tuple[str, int]] = {}
+
+    # ==================== 每日去重配額 ====================
+
+    def _remaining_daily_quota(self, user_id: str) -> int:
+        """回傳該使用者今天還能送進去重流程的事實筆數上限"""
+        today = date.today().isoformat()
+        last_date, used = self._daily_dedup_usage.get(user_id, (today, 0))
+        if last_date != today:
+            used = 0
+        return max(0, FACTS_DEDUP_MAX_FACTS_PER_USER_PER_DAY - used)
+
+    def _consume_daily_quota(self, user_id: str, count: int) -> None:
+        """記錄該使用者今天已處理的去重筆數（跨日自動歸零重算）"""
+        if count <= 0:
+            return
+        today = date.today().isoformat()
+        last_date, used = self._daily_dedup_usage.get(user_id, (today, 0))
+        if last_date != today:
+            used = 0
+        self._daily_dedup_usage[user_id] = (today, used + count)
 
     # ==================== 單一使用者去重 ====================
 
     async def dedupe_user(self, user_id: str) -> None:
-        """對單一使用者的事實清單執行一輪語意去重"""
+        """對單一使用者的事實清單執行一輪語意去重，受每日去重配額限制"""
         if not ENABLE_FACTS_DEDUP:
             return
 
@@ -55,9 +79,19 @@ class FactsDeduplicator:
         if len(facts) < 2:
             return
 
+        quota = self._remaining_daily_quota(user_id)
+        if quota <= 0:
+            logger.debug(f"🧬 [去重跳過] 用戶 ID:{user_id} 今日去重配額已用盡，留到明天再處理")
+            return
+        if len(facts) > quota:
+            facts = facts[:quota]
+            if len(facts) < 2:
+                return
+
         await self._backfill_embeddings(user_id, facts)
 
         clusters = MemoryManager.group_facts(facts, threshold=FACTS_DEDUP_SIMILARITY_THRESHOLD)
+        self._consume_daily_quota(user_id, len(facts))
         if not clusters:
             return
 

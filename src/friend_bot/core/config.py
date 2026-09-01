@@ -136,6 +136,7 @@ FACTS_MAX_STORED_PER_USER: int = int(_facts_maint_cfg.get("max_stored_per_user",
 ENABLE_FACTS_DEDUP: bool = bool(_facts_maint_cfg.get("enable_dedup", True))
 FACTS_DEDUP_SIMILARITY_THRESHOLD: float = float(_facts_maint_cfg.get("dedup_similarity_threshold", 0.86))
 FACTS_DEDUP_CLUSTER_MAX_SIZE: int = int(_facts_maint_cfg.get("dedup_cluster_max_size", 6))
+FACTS_DEDUP_MAX_FACTS_PER_USER_PER_DAY: int = int(_facts_maint_cfg.get("dedup_max_facts_per_user_per_day", 30))
 FACTS_EMBEDDING_MODEL: str = str(_facts_maint_cfg.get("embedding_model", "gemini-embedding-001"))
 FACTS_EMBEDDING_BATCH_SIZE: int = int(_facts_maint_cfg.get("embedding_batch_size", 100))
 FACTS_EMBEDDING_BATCH_DELAY_SECONDS: float = float(_facts_maint_cfg.get("embedding_batch_delay_seconds", 1.0))
