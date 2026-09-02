@@ -178,7 +178,7 @@ memory:
     # 每位使用者每天最多讓幾條事實進入去重流程（含 embedding 補算與分群比對）。
     # 這是 process 內的記憶體計數（重啟會歸零），目的是壓低 API 用量的軟上限，
     # 不影響機制 A 的事實數量上界保證，只是讓機制 B 的處理速度變慢。
-    dedup_max_facts_per_user_per_day: 10
+    dedup_max_facts_per_user_per_day: 40
 
     # 用於計算事實 embedding 的模型代號。換模型後舊向量會自動判定過期並重算。
     embedding_model: "gemini-embedding-001"
@@ -205,15 +205,19 @@ memory:
 # 語音頻道感知與音樂推薦 (Music Suggestion) 設定
 music:
   # 是否啟用語音頻道感知與音樂推薦。
-  # 注意：Discord API 不允許 bot 呼叫另一個 bot 的 Slash 指令，因此這裡只會「建議」——
-  # 紅莉栖推薦歌曲並附上可直接複製的指令，實際播放仍需群友自己執行。
+  # 現在音樂 bot（Muse）用文字前綴指令（如 m.play）且不忽略其他 bot 的訊息，
+  # 因此紅莉栖判斷該推薦音樂時會「直接代發指令」讓歌真的播放，不再只是建議群友複製。
   enable_music_suggestion: true
 
-  # 推薦時輸出的指令前綴。換用其他音樂 bot 時只要改這裡，不需改程式碼。
-  play_command: "/play"
+  # 實際代發時使用的指令前綴＋子指令。換用其他音樂 bot 時只要改這裡，不需改程式碼。
+  play_command: "m.play"
 
   # 最多帶入幾位語音在場者的喜好（與其他群友共用 max_others 配額）
   voice_members_max: 5
+
+  # 代發 play_command 指令訊息的頻道 ID（也可用 .env 的 MUSIC_COMMAND_CHANNEL_ID 設定）。
+  # 留空則直接送到觸發這次回覆的當下頻道。
+  command_channel_id: ""
 
 # 好感度與人際進展 (Favorability & Progression) 設定
 favorability:

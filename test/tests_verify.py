@@ -24,6 +24,7 @@ from src.friend_bot.ai.prompts import (
     format_memory_context,
     build_burst_dialogue_prompt,
     parse_burst_reply_response,
+    parse_music_play_tag,
     build_multi_entity_extraction_prompt,
     build_batch_dialogue_extraction_prompt,
     format_voice_channel_context,
@@ -1642,12 +1643,27 @@ class TestFriendBotFeatures(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(p["favorability"], 30)
 
     def test_music_rule_present_in_system_instruction(self):
-        """系統指令需含音樂推薦規則，且指令前綴取自設定"""
+        """系統指令需含音樂推薦規則，且指令前綴取自設定，並要求以 [play:] 標籤代發"""
         si = build_system_instruction()
-        self.assertIn("10. 【音樂推薦】", si)
-        self.assertIn(f"{MUSIC_PLAY_COMMAND} 歌名", si)
-        # 明確告知模型自己無法播放，避免它承諾做不到的事
-        self.assertIn("你自己無法播放音樂", si)
+        self.assertIn("10. 【音樂推薦與代發指令】", si)
+        self.assertIn("[play: 歌名 - 演出者]", si)
+        self.assertIn(f"不要自己在文字裡輸出 `{MUSIC_PLAY_COMMAND}`", si)
+        # 明確告知模型自己點得動，避免它沿用舊認知說出無法播放的話
+        self.assertIn("你現在點得動", si)
+
+    def test_parse_music_play_tag_extracts_query_and_strips_tag(self):
+        """[play: 歌名 - 演出者] 標籤需被完整移除，且查詢字串正確擷取"""
+        raw = "欸這首超適合現在氣氛的啦，你們聽聽看。\n[play: Bad Apple!! - nomico]"
+        clean, query = parse_music_play_tag(raw)
+        self.assertEqual(query, "Bad Apple!! - nomico")
+        self.assertNotIn("[play:", clean)
+        self.assertIn("欸這首超適合現在氣氛的啦", clean)
+
+    def test_parse_music_play_tag_returns_none_when_absent(self):
+        """沒有標籤時視為這次不點播，不應誤觸發代發"""
+        clean, query = parse_music_play_tag("今天天氣真好，適合出門走走。")
+        self.assertIsNone(query)
+        self.assertEqual(clean, "今天天氣真好，適合出門走走。")
 
     # ==================== 28. 事實容量控制與語意去重 (機制 A + B) ====================
 

@@ -22,12 +22,15 @@ def get_current_time_str() -> str:
     weekday_str = weekdays[now.weekday()]
     return now.strftime(f"%Y年%m月%d日 %H:%M:%S ({weekday_str})")
 
-MUSIC_SUGGESTION_RULE = """10. 【音樂推薦】：
+MUSIC_SUGGESTION_RULE = """10. 【音樂推薦與代發指令】：
    - 上下文若出現【語音頻道現況】，代表那些人此刻正和發言者同在語音頻道裡。
    - 當對話自然聊到音樂、心情或氣氛時，你可以推薦一首歌，並**結合在場者已知的喜好**挑選。
-   - 推薦時附上可直接複製執行的指令，格式為：`{play_command} 歌名 - 演出者`
-   - 你自己無法播放音樂，指令要由群友複製去執行——用自然的語氣帶出來，別像客服念稿。
-   - 不要每次都推薦；只在話題自然帶到時才做。"""
+   - 你自己聽不到播放結果，但可以**實際幫忙點播**：決定要播放時，在回覆的最後一行加上
+     `[play: 歌名 - 演出者]` 標籤（歌名與演出者用你決定的推薦內容填入即可）。
+   - 這個標籤不會被群友看到，系統會自動把它轉成真正的點播指令另外送出，
+     所以你的回覆本文用自然口語帶出推薦就好，**不要自己在文字裡輸出 `{play_command}` 這種指令格式**，
+     也不要說「我沒辦法播放」這種話——你現在點得動。
+   - 不要每次都推薦或點播；只在話題自然帶到、你也判斷適合時才做，避免洗頻。"""
 
 def build_system_instruction() -> str:
     """建立系統人格與核心規則指令"""
@@ -251,6 +254,24 @@ def parse_burst_reply_response(raw_text: str, default_target_id: str = "") -> Tu
         return target_id, content
     
     return default_target_id, cleaned
+
+_MUSIC_PLAY_TAG_REGEX = re.compile(r'\[play:\s*([^\]]+)\]', re.IGNORECASE)
+
+def parse_music_play_tag(raw_text: str) -> Tuple[str, Optional[str]]:
+    """
+    解析回覆文字中的 `[play: 歌名 - 演出者]` 標籤，供音樂代發指令使用。
+    回傳: (移除標籤後的乾淨回覆文字, 點播查詢字串或 None)
+
+    標籤只會出現在模型判斷「要實際點播」時，位置不固定（規則要求放最後一行，
+    但仍以整段文字搜尋以防模型沒有嚴格遵守），找不到就回傳 None 代表這次不點播。
+    """
+    match = _MUSIC_PLAY_TAG_REGEX.search(raw_text)
+    if not match:
+        return raw_text.strip(), None
+
+    query = match.group(1).strip()
+    cleaned = _MUSIC_PLAY_TAG_REGEX.sub('', raw_text).strip()
+    return cleaned, (query or None)
 
 # 【輸出規範】與收尾指令：兩種提煉 Prompt（單次即時 / 多輪批次）共用同一份輸出格式要求，
 # 抽成共用常數避免未來調整輸出格式時漏改其中一處。至於「好感度評估」「深度結構化社交印象」等規則，

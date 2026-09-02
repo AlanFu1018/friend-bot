@@ -25,6 +25,8 @@ from src.friend_bot.core.config import (
     FACTS_OTHERS_RECENT_LIMIT,
     ENABLE_MUSIC_SUGGESTION,
     VOICE_MEMBERS_MAX,
+    MUSIC_PLAY_COMMAND,
+    MUSIC_COMMAND_CHANNEL_ID,
 )
 from src.friend_bot.core.logger import get_logger
 from src.friend_bot.ai.gemini_client import GeminiClient
@@ -33,7 +35,8 @@ from src.friend_bot.ai.facts_dedup import FactsDeduplicator
 from src.friend_bot.ai.prompts import (
     format_memory_context,
     build_burst_dialogue_prompt,
-    parse_burst_reply_response
+    parse_burst_reply_response,
+    parse_music_play_tag
 )
 from src.friend_bot.bot.handlers import download_image_attachments, split_message
 from src.friend_bot.bot.utils import (
@@ -217,6 +220,34 @@ class FriendBotClient(
 
         return {"channel_name": getattr(channel, "name", "語音頻道"), "members": members}
 
+    async def _dispatch_music_command(self, song_query: str, fallback_channel: discord.abc.Messageable) -> None:
+        """
+        將模型決定的點播查詢代發成真正的 `{MUSIC_PLAY_COMMAND} <query>` 指令訊息。
+
+        音樂 bot（Muse）不忽略其他 bot 的訊息，因此這則指令訊息本身就會被它讀取執行——
+        與聊天回覆刻意分成兩則獨立訊息發送，指令本文不含任何人格對話內容。
+
+        目標頻道優先用設定的 MUSIC_COMMAND_CHANNEL_ID；未設定則回退到觸發這次回覆的頻道。
+        找不到設定的頻道（ID 打錯、bot 沒權限看到）時記錄警告並直接放棄，不影響聊天回覆本身。
+        """
+        target_channel = fallback_channel
+        if MUSIC_COMMAND_CHANNEL_ID:
+            cached = self.get_channel(int(MUSIC_COMMAND_CHANNEL_ID))
+            if cached is not None:
+                target_channel = cached
+            else:
+                try:
+                    target_channel = await self.fetch_channel(int(MUSIC_COMMAND_CHANNEL_ID))
+                except (discord.NotFound, discord.Forbidden, ValueError) as e:
+                    logger.warning(f"[音樂代發] 找不到設定的 MUSIC_COMMAND_CHANNEL_ID={MUSIC_COMMAND_CHANNEL_ID}，改用當下頻道: {e}")
+                    target_channel = fallback_channel
+
+        try:
+            await target_channel.send(f"{MUSIC_PLAY_COMMAND} {song_query}")
+            logger.info(f"[音樂代發] 已送出點播指令: {MUSIC_PLAY_COMMAND} {song_query}")
+        except discord.HTTPException as e:
+            logger.warning(f"[音樂代發] 送出點播指令失敗: {e}")
+
     async def _on_burst_flush(self, channel_id: str, messages: List[discord.Message], is_burst: bool):
         """Burst 緩衝區到期或滿載時的回呼"""
         if not messages:
@@ -380,6 +411,12 @@ class FriendBotClient(
                 )
 
             if response_text:
+                # 解析模型可能附上的 [play: 歌名 - 演出者] 點播標籤，並從聊天文字中移除
+                # （標籤不是給人看的內容）。指令要等聊天訊息都送出後才代發，見下方。
+                song_query = None
+                if ENABLE_MUSIC_SUGGESTION:
+                    response_text, song_query = parse_music_play_tag(response_text)
+
                 # 若為 Burst 模式，解析模型回傳的 [TARGET_ID: xxx]
                 if is_burst and len(messages) >= 2:
                     picked_target_id, clean_response_text = parse_burst_reply_response(
@@ -435,6 +472,10 @@ class FriendBotClient(
                     f"已回覆訊息 (Burst={is_burst}, 引用對象: [{target_msg_obj.author.display_name} - {target_msg_obj.id}], "
                     f"氣泡數: {len(chunks)})"
                 )
+
+                # 聊天訊息都送出後，才代發真正的點播指令（與人格對話分成獨立訊息）
+                if song_query:
+                    await self._dispatch_music_command(song_query=song_query, fallback_channel=channel)
 
                 # 非同步背景提煉記憶與好感度（單人／多人皆走統一入口，由它決定引擎與白名單）
                 dialogue_batch = [
