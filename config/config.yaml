@@ -191,7 +191,7 @@ memory:
     embedding_batch_delay_seconds: 1.0
 
     # 背景語意去重批次的執行間隔秒數。
-    dedup_sweep_interval_seconds: 86400
+    dedup_sweep_interval_seconds: 3600
 
   # 【互動印象保護 (Interaction Notes Protection) 設定】
   # 模型每次提煉會整段輸出 interaction_notes（含【核心性格】【社交關係】【近期動態】三個
