@@ -15,7 +15,7 @@ from src.friend_bot.core.config import (
     SEARCH_TOP_K,
 )
 from src.friend_bot.core.logger import get_logger
-from .prompts import build_system_instruction, build_facts_dedup_prompt
+from .prompts import build_system_instruction, build_facts_dedup_prompt, build_receipt_extraction_prompt
 from src.friend_bot.ai.tools.web_search_tool import perform_web_search
 from src.friend_bot.core.emotion import EmotionReplacer
 
@@ -161,6 +161,69 @@ class GeminiClient:
 
             logger.error(f"Gemini 生成回應失敗: {e}", exc_info=True)
             return "（剛才走神了，能再跟我說一次嗎？）"
+
+    async def extract_receipt_items(self, image_bytes: bytes, mime_type: str) -> List[Dict[str, Any]]:
+        """
+        多模態辨識收據圖片中的品項與金額，回傳 [{"name": str, "price": float}, ...]。
+
+        刻意不透過 generate_response()：那條路徑是聊天導向的（emotion 標籤替換、工具呼叫迴圈），
+        對「取得乾淨 JSON」是額外負擔且較不穩定。改用 Gemini 結構化輸出
+        (response_mime_type="application/json" + response_schema) 直接約束輸出格式，
+        比 facts_similar_check() 那種手動拆 ```json fence 的方式更可靠——金額辨識錯誤直接影響
+        使用者會送出的欠款金額，值得多花一點成本換穩定性。
+
+        辨識失敗、圖片非收據、或解析不出任何合法品項時一律回傳空列表，交由呼叫端顯示對應提示，
+        不拋出例外中斷 /kurisu-money 指令流程。
+        """
+        if not self.api_key:
+            return []
+
+        schema = types.Schema(
+            type=types.Type.OBJECT,
+            properties={
+                "items": types.Schema(
+                    type=types.Type.ARRAY,
+                    items=types.Schema(
+                        type=types.Type.OBJECT,
+                        properties={
+                            "name": types.Schema(type=types.Type.STRING),
+                            "price": types.Schema(type=types.Type.NUMBER),
+                        },
+                        required=["name", "price"],
+                    ),
+                )
+            },
+            required=["items"],
+        )
+        config = types.GenerateContentConfig(
+            system_instruction=build_receipt_extraction_prompt(),
+            temperature=0.1,
+            response_mime_type="application/json",
+            response_schema=schema,
+        )
+
+        try:
+            part = types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
+            response = await self.client.aio.models.generate_content(
+                model=self.model, contents=[part], config=config
+            )
+            data = json.loads(response.text) if response and response.text else {}
+            raw_items = data.get("items", [])
+        except Exception as e:
+            logger.error(f"收據品項辨識失敗: {e}", exc_info=True)
+            return []
+
+        items: List[Dict[str, Any]] = []
+        for raw in raw_items:
+            try:
+                name = str(raw.get("name", "")).strip()
+                price = float(raw.get("price"))
+            except (TypeError, ValueError, AttributeError):
+                continue
+            if not name or price <= 0:
+                continue
+            items.append({"name": name, "price": price})
+        return items
 
     async def facts_similar_check(self, cluster: List[str]) -> Dict[str, Any]:
         """

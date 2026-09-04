@@ -54,6 +54,7 @@ REPLY_CHANNEL_IDS = _parse_channel_ids(yaml 的值, "REPLY_CHANNEL_IDS")
 | `web_search` | 搜尋開關、top_k、單頁字元上限 | [`web_search.md`](web_search.md) |
 | `calendar` | Webhook URL 與頭像 | [`calendar_and_alarm.md`](calendar_and_alarm.md) |
 | `gemini` | 模型、溫度、penalty、輸出上限 | 下方 §3 |
+| `money` | 收據拆帳開關、`$w2w` 前綴、品項上限、卡片逾時、代發頻道 ID | [`commands.md`](commands.md#kurisu-money) |
 | `memory` | 三層記憶、提煉、別名、三軌 RAG、深度回憶 | [`memory_sys_design.md`](memory_sys_design.md) |
 | `favorability` | 好感度開關、初始值、每日上下限 | [`persona_and_favorability.md`](persona_and_favorability.md) |
 | `persona` | bot 名稱、人格檔路徑 | [`persona_and_favorability.md`](persona_and_favorability.md) |

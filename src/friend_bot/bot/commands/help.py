@@ -59,6 +59,15 @@ class HelpCommandsMixin:
             inline=False
         )
         embed.add_field(
+            name="🧾 `/kurisu-money <收據照片>`",
+            value=(
+                "**【收據拆帳】**\n"
+                "上傳收據照片，紅莉栖幫你讀出每個品項與金額，逐項產生拆帳卡片：選好「欠錢的人」與「被欠款的人」後，"
+                "按確認即可代發 `$w2w` 指令；也可修改辨識金額或取消該筆。"
+            ),
+            inline=False
+        )
+        embed.add_field(
             name="💬 `日常直接對話（支援多人短時熱絡引用回覆）`",
             value="**【自然群友聊天】**\n直接在頻道內聊天，短時間內**多人熱烈發言時會智慧選擇引用對象**，精準吐槽並兼顧在場群友！",
             inline=False

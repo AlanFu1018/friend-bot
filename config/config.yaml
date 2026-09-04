@@ -219,6 +219,25 @@ music:
   # 留空則直接送到觸發這次回覆的當下頻道。
   command_channel_id: ""
 
+# 收據拆帳 (Money Split) 設定
+money:
+  # 是否啟用 /kurisu-money 收據拆帳指令
+  enable_money_split: true
+
+  # 代發拆帳指令時使用的前綴＋子指令。換用其他拆帳 bot 時只要改這裡，不需改程式碼。
+  w2w_command: "$w2w"
+
+  # 單張收據最多產生幾張拆帳卡片，避免品項過多時洗版頻道。超過的品項會被捨棄，
+  # 並在指令回覆中提示使用者其餘品項請自行手動 $w2w。
+  max_receipt_items: 15
+
+  # 拆帳卡片閒置逾時秒數：超過此時間沒人互動，卡片元件會自動鎖定。
+  view_timeout_seconds: 600
+
+  # 代發 w2w_command 指令訊息的頻道 ID（也可用 .env 的 MONEY_COMMAND_CHANNEL_ID 設定）。
+  # 留空則直接送到觸發 /kurisu-money 指令當下的頻道。
+  command_channel_id: ""
+
 # 好感度與人際進展 (Favorability & Progression) 設定
 favorability:
   # 是否開啟動態好感度與人際關係進展系統

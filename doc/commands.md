@@ -20,6 +20,7 @@
 | `/kurisu-calendar-set` | 登記行事曆排程 | `time`、`content`、`webhook_url` |
 | `/kurisu-calendar-list` | 查看未來一個月排程 | — |
 | `/kurisu-calendar-cancel` | 取消排程 | `event_id` |
+| `/kurisu-money` | 收據拆帳，逐品項產生 `$w2w` 代發卡片 | `photo` |
 
 指令在 `setup_hook()` 中註冊後呼叫 `tree.sync()` 同步至 Discord。**新指令上線後可能需要數分鐘才會出現在客戶端**。
 
@@ -56,6 +57,17 @@
 ### 鬧鐘與行事曆指令
 
 時間格式與兩者的差別見 [`calendar_and_alarm.md`](calendar_and_alarm.md)。`-list` 只列出**自己**的項目；`-cancel` 需提供 `-list` 中顯示的 ID。
+
+### `/kurisu-money`
+
+上傳收據照片（`discord.Attachment` 參數，Discord 客戶端會直接跳出上傳欄位）。流程：
+
+1. `defer(thinking=True)` 後下載圖片，呼叫 `GeminiClient.extract_receipt_items()`（`ai/gemini_client.py`）用 Gemini 結構化輸出（`response_schema`）辨識品項與金額，排除小計/總計/折扣等匯總列。
+2. 品項數超過 `MAX_RECEIPT_ITEMS`（預設 15）時只取前 N 項，避免洗頻道。
+3. **每個品項各自 `followup.send()` 一張獨立卡片**（`bot/utils/money/receipt_view.py` 的 `ReceiptItemView`）：兩個 `discord.ui.UserSelect`（欠錢的人／被欠款的人）＋「修改金額」「取消」「確認送出」三顆按鈕。
+4. 按「確認送出」時驗證兩人皆已選且不同人，鎖定卡片後呼叫 `FriendBotClient._dispatch_money_command()`（與 `_dispatch_music_command()` 同一套「代發指令到指定頻道」模式）送出 `{W2W_COMMAND_PREFIX} @debtor @creditor amount`。
+
+卡片只允許發起人操作（`interaction_check`），`_finalized` 旗標統一守住 confirm/cancel/edit 三顆按鈕避免重複送出或狀態矛盾，逾時（`MONEY_VIEW_TIMEOUT_SECONDS`）自動鎖定所有元件。
 
 ---
 

@@ -27,6 +27,8 @@ from src.friend_bot.core.config import (
     VOICE_MEMBERS_MAX,
     MUSIC_PLAY_COMMAND,
     MUSIC_COMMAND_CHANNEL_ID,
+    W2W_COMMAND_PREFIX,
+    MONEY_COMMAND_CHANNEL_ID,
 )
 from src.friend_bot.core.logger import get_logger
 from src.friend_bot.ai.gemini_client import GeminiClient
@@ -44,7 +46,8 @@ from src.friend_bot.bot.utils import (
     AlarmScheduler,
     CalendarManager,
     CalendarScheduler,
-    BurstBufferManager
+    BurstBufferManager,
+    format_amount
 )
 from src.friend_bot.memory import MemoryManager
 
@@ -55,7 +58,8 @@ from src.friend_bot.bot.commands import (
     ProfileCommandsMixin,
     AliasCommandsMixin,
     AlarmCommandsMixin,
-    CalendarCommandsMixin
+    CalendarCommandsMixin,
+    MoneyCommandsMixin
 )
 
 logger = get_logger("client")
@@ -68,6 +72,7 @@ class FriendBotClient(
     AliasCommandsMixin,
     AlarmCommandsMixin,
     CalendarCommandsMixin,
+    MoneyCommandsMixin,
     discord.Client
 ):
     """Discord Bot 客戶端（透過 Mixin 繼承各類別 Slash 指令實作，支援定時鬧鐘、行事曆、多人群聊短時熱絡聚合與動態引用回覆）"""
@@ -95,6 +100,7 @@ class FriendBotClient(
         self.register_alias_commands()
         self.register_alarm_commands()
         self.register_calendar_commands()
+        self.register_money_commands()
 
         # 同步指令至 Discord 伺服器
         try:
@@ -247,6 +253,36 @@ class FriendBotClient(
             logger.info(f"[音樂代發] 已送出點播指令: {MUSIC_PLAY_COMMAND} {song_query}")
         except discord.HTTPException as e:
             logger.warning(f"[音樂代發] 送出點播指令失敗: {e}")
+
+    async def _dispatch_money_command(
+        self, debtor: discord.abc.User, creditor: discord.abc.User, amount: float,
+        fallback_channel: discord.abc.Messageable
+    ) -> None:
+        """
+        將 /kurisu-money 拆帳卡片確認後的結果代發成真正的 `{W2W_COMMAND_PREFIX} @debtor @creditor amount` 指令訊息，
+        交給頻道內的拆帳 bot 讀取執行。
+
+        目標頻道優先用設定的 MONEY_COMMAND_CHANNEL_ID；未設定則回退到觸發 /kurisu-money 指令當下的頻道。
+        找不到設定的頻道（ID 打錯、bot 沒權限看到）時記錄警告並改用當下頻道，與 _dispatch_music_command 同一套容錯邏輯。
+
+        故意不在此處吞掉 send() 失敗的例外——呼叫端 (ReceiptItemView.confirm) 需要知道代發是否真的失敗，
+        才能正確告知使用者「代發失敗」而非誤報「已送出」。
+        """
+        target_channel = fallback_channel
+        if MONEY_COMMAND_CHANNEL_ID:
+            cached = self.get_channel(int(MONEY_COMMAND_CHANNEL_ID))
+            if cached is not None:
+                target_channel = cached
+            else:
+                try:
+                    target_channel = await self.fetch_channel(int(MONEY_COMMAND_CHANNEL_ID))
+                except (discord.NotFound, discord.Forbidden, ValueError) as e:
+                    logger.warning(f"[拆帳代發] 找不到設定的 MONEY_COMMAND_CHANNEL_ID={MONEY_COMMAND_CHANNEL_ID}，改用當下頻道: {e}")
+                    target_channel = fallback_channel
+
+        amount_str = format_amount(amount)
+        await target_channel.send(f"{W2W_COMMAND_PREFIX} {debtor.mention} {creditor.mention} {amount_str}")
+        logger.info(f"[拆帳代發] 已送出指令: {W2W_COMMAND_PREFIX} {debtor.id} {creditor.id} {amount_str}")
 
     async def _on_burst_flush(self, channel_id: str, messages: List[discord.Message], is_burst: bool):
         """Burst 緩衝區到期或滿載時的回呼"""

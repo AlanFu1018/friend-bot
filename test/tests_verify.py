@@ -39,7 +39,9 @@ from src.friend_bot.bot.commands import (
     ProfileCommandsMixin,
     AlarmCommandsMixin,
     CalendarCommandsMixin,
+    MoneyCommandsMixin,
 )
+from src.friend_bot.bot.utils.money import format_amount
 
 
 def get_fact_texts(facts: list) -> list:
@@ -546,12 +548,14 @@ class TestFriendBotFeatures(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(client, ProfileCommandsMixin)
         self.assertIsInstance(client, AlarmCommandsMixin)
         self.assertIsInstance(client, CalendarCommandsMixin)
+        self.assertIsInstance(client, MoneyCommandsMixin)
 
         client.register_help_commands()
         client.register_search_commands()
         client.register_profile_commands()
         client.register_alarm_commands()
         client.register_calendar_commands()
+        client.register_money_commands()
 
         registered_command_names = [cmd.name for cmd in client.tree.get_commands()]
         expected_commands = [
@@ -563,10 +567,18 @@ class TestFriendBotFeatures(unittest.IsolatedAsyncioTestCase):
             "kurisu-alarm-cancel",
             "kurisu-calendar-set",
             "kurisu-calendar-list",
-            "kurisu-calendar-cancel"
+            "kurisu-calendar-cancel",
+            "kurisu-money"
         ]
         for cmd_name in expected_commands:
             self.assertIn(cmd_name, registered_command_names, f"指令 /{cmd_name} 未正確註冊至 CommandTree！")
+
+    # ==================== 13. 收據拆帳 (Money Split) 測試 ====================
+    def test_format_amount(self):
+        self.assertEqual(format_amount(120.0), "120")
+        self.assertEqual(format_amount(99.5), "99.5")
+        self.assertEqual(format_amount(33.333), "33.33")
+        self.assertEqual(format_amount(10.10), "10.1")
 
     # ==================== 13. 三軌混合事實檢索 (Three-track RAG) 測試 ====================
     def test_three_track_rag_filtering(self):

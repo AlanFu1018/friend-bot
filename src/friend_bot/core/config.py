@@ -177,6 +177,20 @@ MUSIC_COMMAND_CHANNEL_ID: str = os.getenv(
     "MUSIC_COMMAND_CHANNEL_ID", str(_music_cfg.get("command_channel_id", "") or "")
 ).strip()
 
+# 7.6 收據拆帳 (Money Split) 設定
+_money_cfg = _yaml_config.get("money", {})
+ENABLE_MONEY_SPLIT: bool = bool(_money_cfg.get("enable_money_split", True))
+# 代發拆帳指令使用的前綴，換用其他拆帳 bot 時只要改這裡，不需改程式碼。
+W2W_COMMAND_PREFIX: str = str(_money_cfg.get("w2w_command", "$w2w")).strip() or "$w2w"
+# 單張收據最多產生幾張拆帳卡片，避免品項過多洗版頻道。
+MAX_RECEIPT_ITEMS: int = int(_money_cfg.get("max_receipt_items", 15))
+# 拆帳卡片閒置逾時秒數，逾時後鎖定卡片元件。
+MONEY_VIEW_TIMEOUT_SECONDS: int = int(_money_cfg.get("view_timeout_seconds", 600))
+# 代發 w2w_command 指令訊息的目標頻道；留空則回退成觸發 /kurisu-money 指令當下的頻道。
+MONEY_COMMAND_CHANNEL_ID: str = os.getenv(
+    "MONEY_COMMAND_CHANNEL_ID", str(_money_cfg.get("command_channel_id", "") or "")
+).strip()
+
 # 8. 好感度與人際進展 (Favorability) 設定
 _fav_cfg = _yaml_config.get("favorability", {})
 ENABLE_FAVORABILITY: bool = bool(_fav_cfg.get("enable_favorability", True))

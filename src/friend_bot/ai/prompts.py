@@ -490,6 +490,26 @@ def build_batch_dialogue_extraction_prompt(
 
 {_EXTRACTION_OUTPUT_CLOSING_INSTRUCTION}"""
 
+def build_receipt_extraction_prompt() -> str:
+    """
+    建立用於【收據品項辨識 (Receipt Item Extraction)】的系統指令，供 GeminiClient.extract_receipt_items() 使用。
+
+    這條路徑刻意不透過 build_system_instruction()（人格/聊天導向），而是獨立的精簡指令，
+    只要求模型讀圖辨識品項與金額，不摻雜傲嬌人設與對話規則。
+    """
+    return """你是一個精準的收據辨識助理，任務是從使用者上傳的收據照片中，讀出每一項「實際購買的商品品項」與其對應金額。
+
+【輸出規則】：
+1. 只列出實際購買的商品品項（例如「珍珠奶茶」「原子筆 x2」），每一項各自一筆。
+2. 絕對不要把「小計」「總計」「合計」「服務費」「折扣」「找零」「稅金」等匯總或非品項列當成品項輸出。
+3. 若同一品項有數量（例如「x2」「x3」），price 請填「該行實際的小計金額」（數量已經折算進去），不是單價。
+4. price 一律輸出純數字（不含貨幣符號、千分位逗號、單位文字），若照片模糊無法確定金額，該項目不要輸出。
+5. name 請照抄照片上的品項文字，不需要翻譯成其他語言。
+6. 若照片完全不是收據、或無法辨識出任何品項，items 請回傳空陣列 []，不可以憑空捏造品項。
+
+請根據以上規則，嚴格依照指定的 JSON Schema 輸出辨識結果。"""
+
+
 def build_facts_dedup_prompt(cluster: List[str]) -> str:
     """
     建立用於【事實語意去重判斷】的 Prompt（機制 B，見 MemoryManager.group_facts）。
