@@ -64,7 +64,7 @@ class EmotionReplacer:
     _recent_history: Dict[str, List[str]] = {}
     _rare_last_used: Dict[str, float] = {}
     # 連同標籤前的空白一起吃掉，替換時再統一補一個空格，避免留下雙空格
-    _tag_regex = re.compile(r"[ \t]*(?:\[emotion:([\w\-]+)\]|\(emotion:([\w\-]+)\))", re.IGNORECASE)
+    _tag_regex = re.compile(r"[ \t]*(?:`*\[emotion:([\w\-]+)\]`*|`*\(emotion:([\w\-]+)\)`*)", re.IGNORECASE)
 
     # 模型未必會用正式類別名，因此有一層別名映射
     _ALIAS_MAP: Dict[str, str] = {
