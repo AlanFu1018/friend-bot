@@ -58,7 +58,7 @@ class EmotionReplacer:
 
     _kaomoji_map: Dict[str, List[str]] = {}
     _recent_history: Dict[str, List[str]] = {}
-    _tag_regex = re.compile(r"\[emotion:([a-zA-Z0-9_\-]+)\]", re.IGNORECASE)
+    _tag_regex = re.compile(r"[\[(]emotion:([a-zA-Z0-9_\-]+)[\])]", re.IGNORECASE)
 
     @classmethod
     def load_kaomoji(cls, config_path: Optional[Path] = None) -> None:
@@ -143,8 +143,8 @@ class EmotionReplacer:
 
     @classmethod
     def replace_emotion_tags(cls, text: str) -> str:
-        """將字串中的所有 [emotion:xxx] 標籤替換為以行內程式碼區塊 `...` 包裹的隨機顏文字"""
-        if not text or "[emotion:" not in text:
+        """將字串中的所有 [emotion:xxx]/(emotion:xxx) 標籤替換為以行內程式碼區塊 `...` 包裹的隨機顏文字"""
+        if not text or "emotion:" not in text:
             return text
 
         if not cls._kaomoji_map:
