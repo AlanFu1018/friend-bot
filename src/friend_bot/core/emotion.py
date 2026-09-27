@@ -58,7 +58,7 @@ class EmotionReplacer:
 
     _kaomoji_map: Dict[str, List[str]] = {}
     _recent_history: Dict[str, List[str]] = {}
-    _tag_regex = re.compile(r"[\[(]emotion:([a-zA-Z0-9_\-]+)[\])]", re.IGNORECASE)
+    _tag_regex = re.compile(r"`*[\[(]emotion:([a-zA-Z0-9_\-]+)[\])]`*", re.IGNORECASE)
 
     @classmethod
     def load_kaomoji(cls, config_path: Optional[Path] = None) -> None:
