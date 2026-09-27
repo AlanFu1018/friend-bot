@@ -18,6 +18,7 @@ from src.friend_bot.core.logger import get_logger
 from .prompts import build_system_instruction, build_facts_dedup_prompt, build_receipt_extraction_prompt
 from src.friend_bot.ai.tools.web_search_tool import perform_web_search
 from src.friend_bot.core.emotion import EmotionReplacer
+from src.friend_bot.memory.mood_store import ensure_mood_loaded, persist_mood
 
 logger = get_logger("gemini")
 
@@ -52,6 +53,16 @@ class GeminiClient:
         )
         return [types.Tool(function_declarations=[search_func])]
 
+    @staticmethod
+    async def _render_emotions(raw_response: str, mood_channel_id: Optional[str], mood_cause_user: str) -> str:
+        """渲染情緒標籤；有指定頻道時先載入其心情，渲染後把更新過的心情寫回資料庫"""
+        if mood_channel_id:
+            await ensure_mood_loaded(mood_channel_id)
+        rendered = EmotionReplacer.replace_emotion_tags(raw_response, mood_channel_id, mood_cause_user)
+        if mood_channel_id:
+            await persist_mood(mood_channel_id)
+        return rendered
+
     async def generate_response(
         self,
         prompt: str,
@@ -62,12 +73,15 @@ class GeminiClient:
         max_tokens: Optional[int] = None,
         frequency_penalty: Optional[float] = None,
         presence_penalty: Optional[float] = None,
-        enable_tools: bool = True
+        enable_tools: bool = True,
+        mood_channel_id: Optional[str] = None,
+        mood_cause_user: str = ""
     ) -> str:
         """
         發送對話請求至 Gemini 模型並取得回覆文字。
         支援 Tool Calling：若模型判斷需聯網，會暫停並要求搜尋，此處自動執行 DuckDuckGo + Jina AI Reader 後回傳結果給模型生成最終回應。
         自動渲染 [emotion:xxx] 標籤為生動不重複的日系 2ch 顏文字。
+        傳入 mood_channel_id 時，情緒標籤會累積成該頻道的心情並寫回資料庫（僅聊天路徑應傳入）。
         """
         if not self.api_key:
             return "（目前未設定 GEMINI_API_KEY，請在 .env 中填入金鑰～）"
@@ -140,7 +154,7 @@ class GeminiClient:
         try:
             logger.debug(f"向模型 [{self.model}] 發送生成請求 (溫度: {temp}, 聯網工具: {bool(tools)})...")
             raw_response = await _execute_generate(config)
-            return EmotionReplacer.replace_emotion_tags(raw_response)
+            return await self._render_emotions(raw_response, mood_channel_id, mood_cause_user)
         except Exception as e:
             err_msg = str(e)
             # 若為 Penalty 不支援之 400 錯誤，立即自動移除 penalty 重試，確保對話不中斷！
@@ -154,7 +168,7 @@ class GeminiClient:
                 )
                 try:
                     raw_response = await _execute_generate(safe_config)
-                    return EmotionReplacer.replace_emotion_tags(raw_response)
+                    return await self._render_emotions(raw_response, mood_channel_id, mood_cause_user)
                 except Exception as retry_err:
                     logger.error(f"Gemini 重試回應失敗: {retry_err}", exc_info=True)
                     return "（剛才走神了，能再跟我說一次嗎？）"

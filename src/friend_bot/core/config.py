@@ -198,6 +198,18 @@ DEFAULT_FAVORABILITY: int = int(_fav_cfg.get("default_favorability", 30))
 DAILY_GAIN_LIMIT: int = int(_fav_cfg.get("daily_gain_limit", 5))
 DAILY_LOSS_LIMIT: int = int(_fav_cfg.get("daily_loss_limit", 10))
 
+# 8.5 情緒系統 (Emotion) 設定：頻道心情慣性與稀有顏文字
+_emotion_cfg = _yaml_config.get("emotion", {})
+_mood_cfg = _emotion_cfg.get("mood", {})
+ENABLE_MOOD: bool = bool(_mood_cfg.get("enabled", True))
+MOOD_HALF_LIFE_MINUTES: float = float(_mood_cfg.get("half_life_minutes", 20))
+MOOD_STEP: float = float(_mood_cfg.get("step", 1.0))
+MOOD_THRESHOLD: float = float(_mood_cfg.get("threshold", 0.8))
+_rare_cfg = _emotion_cfg.get("rare", {})
+ENABLE_RARE_KAOMOJI: bool = bool(_rare_cfg.get("enabled", True))
+RARE_KAOMOJI_CHANCE: float = float(_rare_cfg.get("chance", 0.01))
+RARE_KAOMOJI_COOLDOWN_HOURS: float = float(_rare_cfg.get("cooldown_hours", 24))
+
 # 9. Persona 與 System Prompt 設定（從 .md 檔案載入）
 _persona_cfg = _yaml_config.get("persona", {})
 BOT_NAME: str = _persona_cfg.get("bot_name", "克莉絲")

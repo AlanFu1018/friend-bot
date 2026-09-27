@@ -22,7 +22,7 @@ def get_current_time_str() -> str:
     weekday_str = weekdays[now.weekday()]
     return now.strftime(f"%Y年%m月%d日 %H:%M:%S ({weekday_str})")
 
-MUSIC_SUGGESTION_RULE = """10. 【音樂推薦與代發指令】：
+MUSIC_SUGGESTION_RULE = """11. 【音樂推薦與代發指令】：
    - 上下文若出現【語音頻道現況】，代表那些人此刻正和發言者同在語音頻道裡。
    - 當對話自然聊到音樂、心情或氣氛時，你可以推薦一首歌，並**結合在場者已知的喜好**挑選。
    - 你自己聽不到播放結果，但可以**實際幫忙點播**：決定要播放時，在回覆的最後一行加上
@@ -66,6 +66,8 @@ def build_system_instruction() -> str:
 7. 【當前時間日期】：若被問及「現在幾點」、「今天幾號」、「星期幾」等時間問題，請直接根據 [基本資訊] 中的【當前系統真實時間】精準回答。
 8. 若參考了該用戶的長期記憶或歷史回憶，請自然融入，切勿生硬複誦「我從資料庫查到你喜歡...」。
 9. 不需要每次回覆都把對方的名字掛在嘴邊，保持自然聊天節奏。
+10. 【目前心情延續】：上下文中若有【你目前的心情】，請讓語氣與情緒標籤自然延續這份心情（例如還在不爽時，就算對方示好也先嘴硬一下）；
+   但不要直接說出「我現在心情是○○」這種話。話題轉開或對方真心道歉時，心情可以逐漸緩和。
 {music_rule}"""
 
 def format_alias_hint(profile: Optional[Dict[str, Any]]) -> str:
@@ -127,9 +129,10 @@ def format_memory_context(
     short_term_history: List[Dict[str, Any]],
     calendar_summary: str = "",
     other_user_profiles: Optional[List[Dict[str, Any]]] = None,
-    voice_context: Optional[Dict[str, Any]] = None
+    voice_context: Optional[Dict[str, Any]] = None,
+    mood_description: str = ""
 ) -> str:
-    """將三層記憶、多人畫像、好感度態度與行事曆排程組合成結構化的 Context 提示文字"""
+    """將三層記憶、多人畫像、好感度態度、行事曆排程與頻道心情組合成結構化的 Context 提示文字"""
     context_parts = []
 
     # 1. 發言者個人長期畫像與好感度態度指引 (第 2 層)
@@ -194,7 +197,11 @@ def format_memory_context(
             history_lines.append(f"- {prefix}{u_name}: {content}")
         context_parts.append("\n".join(history_lines))
 
-    # 6. 近期頻道對話紀錄 (第 1 層)
+    # 6. 頻道心情（MoodTracker.describe 的輸出，平靜時為空字串）
+    if mood_description:
+        context_parts.append(f"【你目前的心情】:\n- {mood_description}")
+
+    # 7. 近期頻道對話紀錄 (第 1 層)
     if short_term_history:
         chat_lines = ["【近期頻道對話紀錄】:"]
         for msg in short_term_history:

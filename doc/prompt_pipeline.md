@@ -162,11 +162,13 @@ SQLite FTS5 的預設 `unicode61` 分詞器會把一整串連續中文視為**�
 7. 【當前時間日期】…
 8. 若參考了長期記憶請自然融入，切勿生硬複誦…
 9. 不需要每次回覆都把對方的名字掛在嘴邊…
+10. 【目前心情延續】：讓語氣延續【你目前的心情】，但不直接說出心情…
+11. 【音樂推薦與代發指令】…                              ← 僅 ENABLE_MUSIC_SUGGESTION 時
 ```
 
 ### 3.2 第 2 層：記憶上下文層
 
-`format_memory_context()` (`ai/prompts.py:54-129`) — 五個區塊以 `"\n\n"` 串接，**順序固定**，任一區塊資料為空則整塊略過：
+`format_memory_context()` (`ai/prompts.py:54-129`) — 各區塊以 `"\n\n"` 串接，**順序固定**，任一區塊資料為空則整塊略過（語音頻道區塊見 [`music_suggestion.md`](music_suggestion.md)；心情區塊由 `MoodTracker.describe(channel_id)` 產生，見 [`emotion_kaomoji.md`](emotion_kaomoji.md) §6）：
 
 ```
 【主要發言者 {current_user_name} 的個人特徵記憶】:
@@ -186,6 +188,9 @@ SQLite FTS5 的預設 `unicode61` 分詞器會把一整串連續中文視為**�
 
 【過去的歷史話題回憶 (供參考，若相關可自然提及)】:
 - [{發言時間}] {發言者}: {內容}                        ← 格式 %Y-%m-%d %H:%M
+
+【你目前的心情】:                                       ← 頻道心情，平靜時整塊略過
+- 你現在{有一點|明顯|非常}{不爽…}（起因和 {cause_user} 剛才的互動有關）。
 
 【近期頻道對話紀錄】:
 {發言者 或 "{BOT_NAME} (你)"}: {內容}{ [附帶圖片] }

@@ -50,6 +50,8 @@ from src.friend_bot.bot.utils import (
     format_amount
 )
 from src.friend_bot.memory import MemoryManager
+from src.friend_bot.memory.mood_store import ensure_mood_loaded
+from src.friend_bot.core.mood import MoodTracker
 
 # 導入所有 Mixin 指令模組
 from src.friend_bot.bot.commands import (
@@ -388,6 +390,9 @@ class FriendBotClient(
                     exclude_message_ids=recent_msg_ids
                 )
 
+            # 頻道心情（首次會從資料庫載入）
+            await ensure_mood_loaded(channel_id)
+
             # 組裝 Context
             memory_context = format_memory_context(
                 current_user_name=latest_user_name,
@@ -396,7 +401,8 @@ class FriendBotClient(
                 short_term_history=short_term,
                 calendar_summary=calendar_summary,
                 other_user_profiles=other_user_profiles,
-                voice_context=voice_context
+                voice_context=voice_context,
+                mood_description=MoodTracker.describe(channel_id)
             )
 
             # 根據是否為 Burst 模式組裝 Prompt
@@ -437,13 +443,17 @@ class FriendBotClient(
                     response_text = await self.gemini.generate_response(
                         prompt=prompt,
                         images=image_bytes_list if image_bytes_list else None,
-                        image_mime_types=image_mime_types if image_mime_types else None
+                        image_mime_types=image_mime_types if image_mime_types else None,
+                        mood_channel_id=channel_id,
+                        mood_cause_user=latest_user_name
                     )
             else:
                 response_text = await self.gemini.generate_response(
                     prompt=prompt,
                     images=image_bytes_list if image_bytes_list else None,
-                    image_mime_types=image_mime_types if image_mime_types else None
+                    image_mime_types=image_mime_types if image_mime_types else None,
+                    mood_channel_id=channel_id,
+                    mood_cause_user=latest_user_name
                 )
 
             if response_text:

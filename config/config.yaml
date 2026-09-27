@@ -251,3 +251,24 @@ favorability:
 
   # 單一用戶「每日好感度扣分上限」（避免因少數誤判過度扣分）
   daily_loss_limit: 20
+
+# 情緒系統 (Emotion) 設定
+emotion:
+  # 頻道心情慣性：模型輸出的 [emotion:xxx] 會累積成該頻道的「目前心情」，
+  # 影響後續顏文字挑選並回饋進 prompt。心情存於資料庫，重啟後延續（但仍會隨時間衰減）。
+  mood:
+    enabled: true
+    # 心情強度的半衰期（分鐘）：經過這段時間強度減半
+    half_life_minutes: 20
+    # 每出現一次情緒標籤，該情緒增加的強度
+    step: 1.0
+    # 強度低於此值視為「平靜」，不注入 prompt、不影響顏文字
+    threshold: 0.8
+
+  # 稀有顏文字：kaomoji.yaml 中各類別的 rare 清單，以極低機率出現
+  rare:
+    enabled: true
+    # 每次挑選顏文字時抽中稀有款的機率
+    chance: 0.01
+    # 同一個稀有款再次出現前的冷卻時間（小時）
+    cooldown_hours: 24

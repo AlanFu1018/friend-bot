@@ -58,6 +58,7 @@ REPLY_CHANNEL_IDS = _parse_channel_ids(yaml 的值, "REPLY_CHANNEL_IDS")
 | `memory` | 三層記憶、提煉、別名、三軌 RAG、深度回憶 | [`memory_sys_design.md`](memory_sys_design.md) |
 | `favorability` | 好感度開關、初始值、每日上下限 | [`persona_and_favorability.md`](persona_and_favorability.md) |
 | `persona` | bot 名稱、人格檔路徑 | [`persona_and_favorability.md`](persona_and_favorability.md) |
+| `emotion` | 頻道心情（半衰期、累積量、門檻）、稀有顏文字（機率、冷卻） | [`emotion_kaomoji.md`](emotion_kaomoji.md) |
 
 ---
 

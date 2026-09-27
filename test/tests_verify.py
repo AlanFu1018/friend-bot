@@ -1657,7 +1657,7 @@ class TestFriendBotFeatures(unittest.IsolatedAsyncioTestCase):
     def test_music_rule_present_in_system_instruction(self):
         """系統指令需含音樂推薦規則，且指令前綴取自設定，並要求以 [play:] 標籤代發"""
         si = build_system_instruction()
-        self.assertIn("10. 【音樂推薦與代發指令】", si)
+        self.assertIn("11. 【音樂推薦與代發指令】", si)
         self.assertIn("[play: 歌名 - 演出者]", si)
         self.assertIn(f"不要自己在文字裡輸出 `{MUSIC_PLAY_COMMAND}`", si)
         # 明確告知模型自己點得動，避免它沿用舊認知說出無法播放的話

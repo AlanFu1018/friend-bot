@@ -161,6 +161,16 @@ async def init_db():
         );
         """)
 
+        # 頻道心情（情緒慣性）：scores 為 {情緒類別: 強度} 的 JSON，強度是 updated_at 當下的值，讀取時再依半衰期衰減
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS channel_moods (
+            channel_id TEXT PRIMARY KEY,
+            scores TEXT NOT NULL DEFAULT '{}',
+            cause_user TEXT DEFAULT '',
+            updated_at REAL NOT NULL
+        );
+        """)
+
         await db.commit()
 
         # 5. 依 schema 版本執行必要的資料遷移

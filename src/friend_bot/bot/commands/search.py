@@ -19,6 +19,8 @@ from src.friend_bot.core.config import (
     FACTS_OTHERS_RECENT_LIMIT
 )
 from src.friend_bot.memory import MemoryManager
+from src.friend_bot.memory.mood_store import ensure_mood_loaded
+from src.friend_bot.core.mood import MoodTracker
 from src.friend_bot.bot.utils.calendar import CalendarManager
 from src.friend_bot.ai.prompts import format_memory_context
 from src.friend_bot.bot.handlers import split_message
@@ -96,6 +98,10 @@ class SearchCommandsMixin:
                     exclude_message_ids=recent_msg_ids
                 )
 
+            # 頻道心情（首次會從資料庫載入）
+            if channel_id:
+                await ensure_mood_loaded(channel_id)
+
             # 組裝上下文與 Prompt
             memory_context = format_memory_context(
                 current_user_name=user_name,
@@ -103,7 +109,8 @@ class SearchCommandsMixin:
                 deep_history=deep_history,
                 short_term_history=short_term,
                 calendar_summary=calendar_summary,
-                other_user_profiles=other_user_profiles
+                other_user_profiles=other_user_profiles,
+                mood_description=MoodTracker.describe(channel_id) if channel_id else ""
             )
 
             prompt = f"""{memory_context}
@@ -117,7 +124,9 @@ class SearchCommandsMixin:
                 # 調用 Gemini 聯網搜尋（強制 enable_tools=True）
                 response_text = await self.gemini.generate_response(
                     prompt=prompt,
-                    enable_tools=True
+                    enable_tools=True,
+                    mood_channel_id=channel_id or None,
+                    mood_cause_user=user_name
                 )
 
                 chunks = split_message(response_text)
