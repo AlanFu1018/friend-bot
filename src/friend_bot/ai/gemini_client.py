@@ -15,6 +15,7 @@ from src.friend_bot.core.config import (
     SEARCH_TOP_K,
 )
 from src.friend_bot.core.logger import get_logger
+from .gemini_http import build_gemini_http_options
 from .prompts import build_system_instruction, build_facts_dedup_prompt, build_receipt_extraction_prompt
 from src.friend_bot.ai.tools.web_search_tool import perform_web_search
 from src.friend_bot.core.emotion import EmotionReplacer
@@ -30,7 +31,7 @@ class GeminiClient:
         self.model = model or GEMINI_MODEL
         if not self.api_key:
             logger.warning("未設定 GEMINI_API_KEY，AI 對話功能將暫時無法使用。")
-        self.client = genai.Client(api_key=self.api_key)
+        self.client = genai.Client(api_key=self.api_key, http_options=build_gemini_http_options())
 
     def _get_tools(self) -> Optional[List[types.Tool]]:
         """建立 Tool 定義（包含 DuckDuckGo + Jina AI Reader 網路搜尋）"""

@@ -74,6 +74,12 @@ gemini:
   # 單次最大生成 Token 數
   max_output_tokens: 2048
 
+  # API 暫時性錯誤（408/429/500/502/503/504）的指數退避重試設定
+  retry:
+    attempts: 5          # 含第一次呼叫
+    initial_delay: 1.0   # 秒，之後約 1→2→4→8 秒（含 jitter）
+    max_delay: 16.0      # 單次等待上限（秒）
+
 # 三層全記憶系統設定
 memory:
   # 第 1 層 (短期記憶)：送入 Prompt 的最近頻道對話訊息數量

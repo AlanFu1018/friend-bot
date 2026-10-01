@@ -116,6 +116,10 @@ GEMINI_TEMPERATURE: float = float(os.getenv("GEMINI_TEMPERATURE", _gemini_cfg.ge
 GEMINI_FREQUENCY_PENALTY: float = float(os.getenv("GEMINI_FREQUENCY_PENALTY", _gemini_cfg.get("frequency_penalty", 0.3)))
 GEMINI_PRESENCE_PENALTY: float = float(os.getenv("GEMINI_PRESENCE_PENALTY", _gemini_cfg.get("presence_penalty", 0.0)))
 GEMINI_MAX_OUTPUT_TOKENS: int = int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", _gemini_cfg.get("max_output_tokens", 2048)))
+_gemini_retry_cfg = _gemini_cfg.get("retry", {})
+GEMINI_RETRY_ATTEMPTS: int = int(os.getenv("GEMINI_RETRY_ATTEMPTS", _gemini_retry_cfg.get("attempts", 5)))
+GEMINI_RETRY_INITIAL_DELAY: float = float(os.getenv("GEMINI_RETRY_INITIAL_DELAY", _gemini_retry_cfg.get("initial_delay", 1.0)))
+GEMINI_RETRY_MAX_DELAY: float = float(os.getenv("GEMINI_RETRY_MAX_DELAY", _gemini_retry_cfg.get("max_delay", 16.0)))
 
 # 7. 記憶系統設定
 _mem_cfg = _yaml_config.get("memory", {})

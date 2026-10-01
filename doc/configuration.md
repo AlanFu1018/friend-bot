@@ -53,7 +53,7 @@ REPLY_CHANNEL_IDS = _parse_channel_ids(yaml 的值, "REPLY_CHANNEL_IDS")
 | `chat_behavior` | 忽略前綴、多氣泡、打字延遲、Burst | [`chat_and_reply.md`](chat_and_reply.md) |
 | `web_search` | 搜尋開關、top_k、單頁字元上限 | [`web_search.md`](web_search.md) |
 | `calendar` | Webhook URL 與頭像 | [`calendar_and_alarm.md`](calendar_and_alarm.md) |
-| `gemini` | 模型、溫度、penalty、輸出上限 | 下方 §3 |
+| `gemini` | 模型、溫度、penalty、輸出上限、503 等暫時性錯誤重試 | 下方 §3 |
 | `money` | 收據拆帳開關、`$w2w` 前綴、品項上限、卡片逾時、代發頻道 ID | [`commands.md`](commands.md#kurisu-money) |
 | `memory` | 三層記憶、提煉、別名、三軌 RAG、深度回憶 | [`memory_sys_design.md`](memory_sys_design.md) |
 | `favorability` | 好感度開關、初始值、每日上下限 | [`persona_and_favorability.md`](persona_and_favorability.md) |
@@ -71,7 +71,15 @@ gemini:
   frequency_penalty: 0.0
   presence_penalty: 0.0
   max_output_tokens: 2048
+  retry:
+    attempts: 5                # 含第一次呼叫
+    initial_delay: 1.0         # 秒
+    max_delay: 16.0            # 單次等待上限（秒）
 ```
+
+### 暫時性錯誤的指數退避重試
+
+`GeminiClient` 與 `FactsEmbeddingClient` 建立 `genai.Client` 時都透過 `ai/gemini_http.py` 的 `build_gemini_http_options()` 開啟 SDK 內建重試（`types.HttpRetryOptions`，SDK 預設是關閉的）。遇到 408/429/500/502/503/504 或 httpx 連線類暫時性例外時，會以約 1→2→4→8 秒（含 jitter、上限 `max_delay`）的間隔重試，最多共 `attempts` 次。重試是在每一次 HTTP 請求層級進行，所以 tool calling 迴圈中途失敗時只會重送該次 `send_message`，不會重跑網路搜尋。重試用盡後例外照常拋出，落入各呼叫端原本的 fallback 處理。三個參數皆可用 `GEMINI_RETRY_ATTEMPTS` / `GEMINI_RETRY_INITIAL_DELAY` / `GEMINI_RETRY_MAX_DELAY` 環境變數覆蓋。
 
 ### Penalty 的自動降級
 

@@ -1,5 +1,5 @@
 discord.py>=2.3.2
-google-genai>=1.0.0
+google-genai>=2.0.0
 aiosqlite>=0.20.0
 PyYAML>=6.0.1
 python-dotenv>=1.0.1

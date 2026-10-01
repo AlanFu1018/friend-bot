@@ -9,6 +9,7 @@ from src.friend_bot.core.config import (
     FACTS_EMBEDDING_BATCH_DELAY_SECONDS,
 )
 from src.friend_bot.core.logger import get_logger
+from src.friend_bot.ai.gemini_http import build_gemini_http_options
 
 logger = get_logger("facts_embedding")
 
@@ -19,7 +20,7 @@ class FactsEmbeddingClient:
     def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None):
         self.api_key = api_key or GEMINI_API_KEY
         self.model = model or FACTS_EMBEDDING_MODEL
-        self.client = genai.Client(api_key=self.api_key)
+        self.client = genai.Client(api_key=self.api_key, http_options=build_gemini_http_options())
 
     async def embed_texts(self, texts: List[str]) -> List[Optional[List[float]]]:
         """
